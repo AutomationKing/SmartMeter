@@ -9,7 +9,7 @@ And Event hub connection string should be available
 
 @mytag
 Scenario: Validate the live data set with event hub
-	Given The data set is triggered from Source
+	#Given The data set is triggered from Source
 
 	#And the data reaches to azure eventhub 
 	#When we validate the "source" and "eventhub" 

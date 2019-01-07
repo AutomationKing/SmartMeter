@@ -18,15 +18,19 @@ using Newtonsoft.Json.Linq;
 using System.Linq;
 using System.Collections;
 using Microsoft.Azure.DataLake.Store;
+using Microsoft.Rest;
 
 namespace TestSmartMeter
 {
     [Binding]
     public class ValidateEventHubSteps
     {
-        private static string _adlsg1AccountName = "sitpim.azuredatalakestore.net";
-        static AdlsClient clientone = AdlsClient.CreateClient(_adlsg1AccountName, "6f1fe4b3-ad1f-45bb-bc50-dbfa7ea82c0b");
+        private static string _adlsg1AccountName = "datalaketestnew.azuredatalakestore.net";
+        ServiceClientCredentials cs;
+       
 
+            static AdlsClient clientone = AdlsClient.CreateClient(_adlsg1AccountName, "a439c49a-0e67-48dc-8572-1126d968d1b1");
+       
         static HttpClient client = new HttpClient();
        
         
@@ -36,14 +40,11 @@ namespace TestSmartMeter
         public void GivenApiDetailsOfTheServicesShouldBeExposed()
         {
 
-            foreach (var entry in clientone.EnumerateDirectory("/Test"))
-            {
-                Console.WriteLine("entry is====="+entry);
-            }
+            
 
 
 
-            using (var readStream = new StreamReader(clientone.GetReadStream("@one.csv")))
+            using (var readStream = new StreamReader(clientone.GetReadStream("/testdatacoming/one.csv")))
             {
                 string line;
                 while ((line = readStream.ReadLine()) != null)
