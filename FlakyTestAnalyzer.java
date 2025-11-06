@@ -27,12 +27,9 @@ public class FlakyTestAnalyzer implements TestExecutionListener {
     private int totalFlaky = 0;
     private int totalFailures = 0;
 
-    private final List<TestSummary> passedTests = new ArrayList<>();
-    private final List<TestSummary> flakyTests = new ArrayList<>();
-    private final List<TestSummary> genuineFailures = new ArrayList<>();
+    private final List<TestSummary> allTestsList = new ArrayList<>();
 
     public FlakyTestAnalyzer() {
-        // Store test history outside target/
         this.historyFile = new File("test-history/test-history.json");
         if (!historyFile.getParentFile().exists()) {
             historyFile.getParentFile().mkdirs();
@@ -42,7 +39,7 @@ public class FlakyTestAnalyzer implements TestExecutionListener {
     @Override
     public void executionStarted(TestIdentifier testIdentifier) {
         if (testIdentifier.isTest()) {
-            startTimes.put(testIdentifier.getDisplayName(), Instant.now());
+            startTimes.put(testIdentifier.getUniqueId(), Instant.now());
         }
     }
 
@@ -50,29 +47,32 @@ public class FlakyTestAnalyzer implements TestExecutionListener {
     public void executionFinished(TestIdentifier testIdentifier, TestExecutionResult result) {
         if (!testIdentifier.isTest()) return;
 
-        // ✅ Generate a unique key using displayName + feature line + example
-        String featureLine = testIdentifier.getSource()
+        // Generate unique human-readable test key
+        String scenarioName = testIdentifier.getDisplayName().split("Example")[0].trim();
+
+        String featureFile = testIdentifier.getSource()
                 .map(Object::toString)
                 .map(src -> {
                     int idx = src.indexOf("feature:");
-                    return idx >= 0 ? src.substring(idx) : "";
-                }).orElse("");
+                    return idx >= 0 ? src.substring(idx + 8).split(":")[0] : "unknown.feature";
+                })
+                .orElse("unknown.feature");
 
-        String testKey = testIdentifier.getDisplayName() + " " + featureLine;
-
-        String displayName = testIdentifier.getDisplayName();
-        if(displayName.contains("[")) {
-            int start = displayName.indexOf("[");
-            int end = displayName.indexOf("]", start);
+        String params = "";
+        if (testIdentifier.getDisplayName().contains("[")) {
+            int start = testIdentifier.getDisplayName().indexOf("[");
+            int end = testIdentifier.getDisplayName().indexOf("]", start);
             if (start >= 0 && end > start) {
-                testKey += " " + displayName.substring(start, end + 1);
+                params = " | " + testIdentifier.getDisplayName().substring(start + 1, end);
             }
         }
 
-        Instant start = startTimes.getOrDefault(testIdentifier.getDisplayName(), Instant.now());
+        String testKey = scenarioName + " | " + featureFile + params;
+
+        Instant start = startTimes.getOrDefault(testIdentifier.getUniqueId(), Instant.now());
         Duration duration = Duration.between(start, Instant.now());
 
-        // ✅ Only the exact error message, truncated if too long
+        // Only exact error message, truncated if too long
         String reason = result.getThrowable()
                 .map(Throwable::getMessage)
                 .map(msg -> msg != null ? msg : result.getThrowable().get().toString())
@@ -82,31 +82,29 @@ public class FlakyTestAnalyzer implements TestExecutionListener {
 
         TestStats stats = getHistoricalStats(testKey);
 
-        // ✅ Mark as flaky if pattern matches OR previously passed at least once
         boolean isFlaky = isFlakyPattern(reason) || ("FAILED".equals(result.getStatus().toString()) && stats.passCount > 0);
 
         logToHistory(testKey, result.getStatus().toString(), duration.toMillis(), reason, isFlaky);
-        printSummary(testKey, result.getStatus().toString(), reason, duration, isFlaky, stats);
 
+        // Update counters
         totalTests++;
         if ("SUCCESSFUL".equals(result.getStatus().toString())) {
             totalPassed++;
-            passedTests.add(new TestSummary(testKey, "-", stats.lastPassedDate));
+            allTestsList.add(new TestSummary(testKey, "-", stats.lastPassedDate, "PASSED"));
         } else if (isFlaky) {
             totalFlaky++;
-            flakyTests.add(new TestSummary(testKey, reason, stats.lastPassedDate));
+            allTestsList.add(new TestSummary(testKey, reason, stats.lastPassedDate, "FLAKY"));
         } else {
             totalFailures++;
-            genuineFailures.add(new TestSummary(testKey, reason, stats.lastPassedDate));
+            allTestsList.add(new TestSummary(testKey, reason, stats.lastPassedDate, "FAILED"));
         }
     }
 
     @Override
     public void testPlanExecutionFinished(TestPlan testPlan) {
-        generateDynamicHtmlReport();
+        generateHtmlReport();
     }
 
-    // Detect known flaky indicators
     private boolean isFlakyPattern(String message) {
         return message.contains("TimeoutException") ||
                message.contains("NoSuchElementException") ||
@@ -172,88 +170,47 @@ public class FlakyTestAnalyzer implements TestExecutionListener {
         return stats;
     }
 
-    private void printSummary(String testKey, String status, String reason, Duration duration,
-                              boolean isFlaky, TestStats stats) {
-        String statsSummary = String.format(" (History: %d passes / %d fails)", stats.passCount, stats.failCount);
-
-        if ("SUCCESSFUL".equals(status)) {
-            System.out.printf("✅ PASSED: %s (%d ms)%s%n", testKey, duration.toMillis(), statsSummary);
-        } else if (isFlaky) {
-            System.out.printf("⚠️  POSSIBLE FLAKY TEST: %s%n   ↪ Reason: %s%n", testKey, reason);
-            if (stats.lastPassedDate != null) System.out.printf("   ↪ Previously PASSED on: %s%n", stats.lastPassedDate);
-            System.out.println("   ↪" + statsSummary);
-        } else {
-            System.out.printf("❌ GENUINE FAILURE: %s%n   ↪ Reason: %s%n", testKey, reason);
-            if (stats.lastPassedDate != null) System.out.printf("   ↪ Previously PASSED on: %s%n", stats.lastPassedDate);
-            System.out.println("   ↪" + statsSummary);
-        }
-    }
-
-    // ✅ Generate dynamic HTML report
-    private void generateDynamicHtmlReport() {
+    private void generateHtmlReport() {
         try {
             StringBuilder html = new StringBuilder();
             html.append("<!DOCTYPE html><html lang='en'><head><meta charset='UTF-8'>")
-                .append("<title>Dynamic Test Report</title>")
+                .append("<title>Test Report</title>")
                 .append("<style>")
-                .append("body {font-family: Arial, sans-serif; margin: 20px; background: #f4f4f9;}")
-                .append("h1,h2 {color:#333;}")
-                .append(".summary {margin-bottom:20px;}")
+                .append("body {font-family: Arial, sans-serif; margin: 20px;}")
                 .append("table {border-collapse: collapse; width: 100%;}")
-                .append("th, td {border: 1px solid #ccc; padding: 8px; text-align:left;}")
+                .append("th, td {border: 1px solid #ccc; padding: 8px;}")
                 .append("th {background:#555; color:#fff;}")
-                .append(".passed {background:#d4edda;}")
-                .append(".flaky {background:#fff3cd;}")
-                .append(".failed {background:#f8d7da;}")
-                .append(".details {display:none; padding: 10px; margin-top:5px; border-left:3px solid #333; background:#eee;}")
-                .append(".clickable {cursor:pointer;}")
-                .append("</style>")
-                .append("<script>")
-                .append("function toggleDetail(id) {")
-                .append("  var e=document.getElementById(id);")
-                .append("  e.style.display = (e.style.display==='none') ? 'block':'none';")
-                .append("}")
-                .append("</script></head><body>");
+                .append(".PASSED {background:#d4edda;}")
+                .append(".FLAKY {background:#fff3cd;}")
+                .append(".FAILED {background:#f8d7da;}")
+                .append("</style></head><body>");
 
-            html.append("<h1>Dynamic Test Execution Report</h1>");
-            html.append(String.format("<div class='summary'><b>Total:</b> %d | <b>Passed:</b> %d | <b>Flaky:</b> %d | <b>Failed:</b> %d</div>",
+            html.append("<h1>Test Execution Report</h1>");
+            html.append(String.format("<p>Total: %d | Passed: %d | Flaky: %d | Failed: %d</p>",
                     totalTests, totalPassed, totalFlaky, totalFailures));
 
             html.append("<table>");
-            html.append("<tr><th>Test Name</th><th>Status</th><th>Last Passed Date</th></tr>");
+            html.append("<tr><th>Test Name</th><th>Status</th><th>Last Passed Date</th><th>Last Failure Reason</th></tr>");
 
-            int idCounter = 0;
-            List<TestSummary> allTests = new ArrayList<>();
-            allTests.addAll(passedTests);
-            allTests.addAll(flakyTests);
-            allTests.addAll(genuineFailures);
-
-            for (TestSummary t : allTests) {
-                String cssClass = t.lastFailureReason.equals("-") ? "passed" :
-                        flakyTests.contains(t) ? "flaky" : "failed";
-
-                String detailId = "detail" + (idCounter++);
-                html.append("<tr class='clickable ").append(cssClass).append("' onclick=\"toggleDetail('").append(detailId).append("')\">")
+            for (TestSummary t : allTestsList) {
+                html.append("<tr class='").append(t.status).append("'>")
                     .append("<td>").append(t.name).append("</td>")
-                    .append("<td>").append(cssClass.toUpperCase()).append("</td>")
-                    .append("<td>").append(t.lastPassDate==null?"-":t.lastPassDate).append("</td>")
+                    .append("<td>").append(t.status).append("</td>")
+                    .append("<td>").append(t.lastPassDate == null ? "-" : t.lastPassDate).append("</td>")
+                    .append("<td>").append(t.lastFailureReason).append("</td>")
                     .append("</tr>");
-
-                html.append("<tr id='").append(detailId).append("' class='details'><td colspan='3'>")
-                    .append("<b>Last Failure Reason:</b> ").append(t.lastFailureReason)
-                    .append("</td></tr>");
             }
 
             html.append("</table></body></html>");
 
-            File reportFile = new File("test-history/dynamic-test-report.html");
+            File reportFile = new File("test-history/test-report.html");
             if (!reportFile.getParentFile().exists()) reportFile.getParentFile().mkdirs();
-
             try (BufferedWriter writer = new BufferedWriter(new FileWriter(reportFile))) {
                 writer.write(html.toString());
             }
 
-            System.out.println("✅ Dynamic HTML Test Report generated at: " + reportFile.getAbsolutePath());
+            System.out.println("✅ HTML Test Report generated at: " + reportFile.getAbsolutePath());
+
         } catch (Exception e) {
             e.printStackTrace();
         }
@@ -269,11 +226,13 @@ public class FlakyTestAnalyzer implements TestExecutionListener {
         String name;
         String lastFailureReason;
         String lastPassDate;
+        String status;
 
-        TestSummary(String name, String reason, String lastPassDate) {
+        TestSummary(String name, String reason, String lastPassDate, String status) {
             this.name = name;
             this.lastFailureReason = reason;
             this.lastPassDate = lastPassDate;
+            this.status = status;
         }
     }
 }
