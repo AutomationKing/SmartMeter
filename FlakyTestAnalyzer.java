@@ -22,18 +22,17 @@ public class FlakyTestAnalyzer implements TestExecutionListener {
     private final ObjectMapper mapper = new ObjectMapper();
     private final File historyFile;
 
-    // Counters
     private int totalTests = 0;
     private int totalPassed = 0;
     private int totalFlaky = 0;
     private int totalFailures = 0;
 
-    // Lists for HTML report
     private final List<TestSummary> passedTests = new ArrayList<>();
     private final List<TestSummary> flakyTests = new ArrayList<>();
     private final List<TestSummary> genuineFailures = new ArrayList<>();
 
     public FlakyTestAnalyzer() {
+        // Store test history outside target/
         this.historyFile = new File("test-history/test-history.json");
         if (!historyFile.getParentFile().exists()) {
             historyFile.getParentFile().mkdirs();
@@ -51,7 +50,7 @@ public class FlakyTestAnalyzer implements TestExecutionListener {
     public void executionFinished(TestIdentifier testIdentifier, TestExecutionResult result) {
         if (!testIdentifier.isTest()) return;
 
-        // Generate unique key: displayName + feature line + example values
+        // ✅ Generate a unique key using displayName + feature line + example
         String featureLine = testIdentifier.getSource()
                 .map(Object::toString)
                 .map(src -> {
@@ -61,16 +60,19 @@ public class FlakyTestAnalyzer implements TestExecutionListener {
 
         String testKey = testIdentifier.getDisplayName() + " " + featureLine;
 
-        // Append example values from displayName if present (Cucumber sometimes adds [customer=123])
         String displayName = testIdentifier.getDisplayName();
         if(displayName.contains("[")) {
-            testKey += " " + displayName.substring(displayName.indexOf("["));
+            int start = displayName.indexOf("[");
+            int end = displayName.indexOf("]", start);
+            if (start >= 0 && end > start) {
+                testKey += " " + displayName.substring(start, end + 1);
+            }
         }
 
         Instant start = startTimes.getOrDefault(testIdentifier.getDisplayName(), Instant.now());
         Duration duration = Duration.between(start, Instant.now());
 
-        // Only exact exception message, truncated if too long
+        // ✅ Only the exact error message, truncated if too long
         String reason = result.getThrowable()
                 .map(Throwable::getMessage)
                 .map(msg -> msg != null ? msg : result.getThrowable().get().toString())
@@ -78,9 +80,10 @@ public class FlakyTestAnalyzer implements TestExecutionListener {
         int maxLength = 200;
         reason = reason.length() > maxLength ? reason.substring(0, maxLength) + "..." : reason;
 
-        boolean isFlaky = isFlakyPattern(reason);
         TestStats stats = getHistoricalStats(testKey);
-        String lastPassDate = stats.lastPassedDate;
+
+        // ✅ Mark as flaky if pattern matches OR previously passed at least once
+        boolean isFlaky = isFlakyPattern(reason) || ("FAILED".equals(result.getStatus().toString()) && stats.passCount > 0);
 
         logToHistory(testKey, result.getStatus().toString(), duration.toMillis(), reason, isFlaky);
         printSummary(testKey, result.getStatus().toString(), reason, duration, isFlaky, stats);
@@ -88,28 +91,29 @@ public class FlakyTestAnalyzer implements TestExecutionListener {
         totalTests++;
         if ("SUCCESSFUL".equals(result.getStatus().toString())) {
             totalPassed++;
-            passedTests.add(new TestSummary(testKey, "-", lastPassDate));
+            passedTests.add(new TestSummary(testKey, "-", stats.lastPassedDate));
         } else if (isFlaky) {
             totalFlaky++;
-            flakyTests.add(new TestSummary(testKey, reason, lastPassDate));
+            flakyTests.add(new TestSummary(testKey, reason, stats.lastPassedDate));
         } else {
             totalFailures++;
-            genuineFailures.add(new TestSummary(testKey, reason, lastPassDate));
+            genuineFailures.add(new TestSummary(testKey, reason, stats.lastPassedDate));
         }
     }
 
     @Override
     public void testPlanExecutionFinished(TestPlan testPlan) {
-        generateHtmlReport();
+        generateDynamicHtmlReport();
     }
 
-    // Detect common flaky patterns
+    // Detect known flaky indicators
     private boolean isFlakyPattern(String message) {
         return message.contains("TimeoutException") ||
                message.contains("NoSuchElementException") ||
                message.contains("StaleElementReferenceException") ||
                message.contains("ElementNotInteractableException") ||
                message.contains("ConnectException") ||
+               message.contains("ElementNotVisibleException") ||
                (message.contains("AssertionError") && message.contains("URL"));
     }
 
@@ -185,71 +189,76 @@ public class FlakyTestAnalyzer implements TestExecutionListener {
         }
     }
 
-    // ✅ Generate HTML report
-    private void generateHtmlReport() {
+    // ✅ Generate dynamic HTML report
+    private void generateDynamicHtmlReport() {
         try {
             StringBuilder html = new StringBuilder();
-            html.append("<html><head><title>Test Execution Report</title>")
+            html.append("<!DOCTYPE html><html lang='en'><head><meta charset='UTF-8'>")
+                .append("<title>Dynamic Test Report</title>")
                 .append("<style>")
-                .append("body {font-family: Arial, sans-serif;}")
-                .append("table {border-collapse: collapse; width: 100%; margin-bottom: 20px;}")
-                .append("th, td {border: 1px solid black; padding: 8px; text-align: left;}")
-                .append("th {background-color: #f2f2f2;}")
-                .append(".passed {background-color: #d4edda;}")
-                .append(".flaky {background-color: #fff3cd;}")
-                .append(".failed {background-color: #f8d7da;}")
-                .append("</style></head><body>");
+                .append("body {font-family: Arial, sans-serif; margin: 20px; background: #f4f4f9;}")
+                .append("h1,h2 {color:#333;}")
+                .append(".summary {margin-bottom:20px;}")
+                .append("table {border-collapse: collapse; width: 100%;}")
+                .append("th, td {border: 1px solid #ccc; padding: 8px; text-align:left;}")
+                .append("th {background:#555; color:#fff;}")
+                .append(".passed {background:#d4edda;}")
+                .append(".flaky {background:#fff3cd;}")
+                .append(".failed {background:#f8d7da;}")
+                .append(".details {display:none; padding: 10px; margin-top:5px; border-left:3px solid #333; background:#eee;}")
+                .append(".clickable {cursor:pointer;}")
+                .append("</style>")
+                .append("<script>")
+                .append("function toggleDetail(id) {")
+                .append("  var e=document.getElementById(id);")
+                .append("  e.style.display = (e.style.display==='none') ? 'block':'none';")
+                .append("}")
+                .append("</script></head><body>");
 
-            html.append("<h2>Test Execution Summary</h2>");
-            html.append(String.format(
-                "<p>Total tests executed: %d | Passed: %d | Flaky: %d | Genuine Failures: %d</p>",
-                totalTests, totalPassed, totalFlaky, totalFailures
-            ));
+            html.append("<h1>Dynamic Test Execution Report</h1>");
+            html.append(String.format("<div class='summary'><b>Total:</b> %d | <b>Passed:</b> %d | <b>Flaky:</b> %d | <b>Failed:</b> %d</div>",
+                    totalTests, totalPassed, totalFlaky, totalFailures));
 
-            html.append("<h3>All Tests</h3><table>");
-            html.append("<tr><th>Test Name</th><th>Status</th><th>Last Failure Reason</th><th>Last Passed Date</th></tr>");
+            html.append("<table>");
+            html.append("<tr><th>Test Name</th><th>Status</th><th>Last Passed Date</th></tr>");
 
-            for (TestSummary t : passedTests) {
-                html.append("<tr class='passed'>")
+            int idCounter = 0;
+            List<TestSummary> allTests = new ArrayList<>();
+            allTests.addAll(passedTests);
+            allTests.addAll(flakyTests);
+            allTests.addAll(genuineFailures);
+
+            for (TestSummary t : allTests) {
+                String cssClass = t.lastFailureReason.equals("-") ? "passed" :
+                        flakyTests.contains(t) ? "flaky" : "failed";
+
+                String detailId = "detail" + (idCounter++);
+                html.append("<tr class='clickable ").append(cssClass).append("' onclick=\"toggleDetail('").append(detailId).append("')\">")
                     .append("<td>").append(t.name).append("</td>")
-                    .append("<td>Passed</td>")
-                    .append("<td>-</td>")
-                    .append("<td>").append(t.lastPassDate == null ? "-" : t.lastPassDate).append("</td>")
+                    .append("<td>").append(cssClass.toUpperCase()).append("</td>")
+                    .append("<td>").append(t.lastPassDate==null?"-":t.lastPassDate).append("</td>")
                     .append("</tr>");
-            }
-            for (TestSummary t : flakyTests) {
-                html.append("<tr class='flaky'>")
-                    .append("<td>").append(t.name).append("</td>")
-                    .append("<td>Flaky</td>")
-                    .append("<td>").append(t.lastFailureReason).append("</td>")
-                    .append("<td>").append(t.lastPassDate == null ? "-" : t.lastPassDate).append("</td>")
-                    .append("</tr>");
-            }
-            for (TestSummary t : genuineFailures) {
-                html.append("<tr class='failed'>")
-                    .append("<td>").append(t.name).append("</td>")
-                    .append("<td>Failed</td>")
-                    .append("<td>").append(t.lastFailureReason).append("</td>")
-                    .append("<td>").append(t.lastPassDate == null ? "-" : t.lastPassDate).append("</td>")
-                    .append("</tr>");
+
+                html.append("<tr id='").append(detailId).append("' class='details'><td colspan='3'>")
+                    .append("<b>Last Failure Reason:</b> ").append(t.lastFailureReason)
+                    .append("</td></tr>");
             }
 
             html.append("</table></body></html>");
 
-            File reportFile = new File("test-history/test-report.html");
+            File reportFile = new File("test-history/dynamic-test-report.html");
             if (!reportFile.getParentFile().exists()) reportFile.getParentFile().mkdirs();
 
             try (BufferedWriter writer = new BufferedWriter(new FileWriter(reportFile))) {
                 writer.write(html.toString());
             }
 
-            System.out.println("✅ HTML Test Report generated at: " + reportFile.getAbsolutePath());
+            System.out.println("✅ Dynamic HTML Test Report generated at: " + reportFile.getAbsolutePath());
         } catch (Exception e) {
             e.printStackTrace();
         }
     }
 
-    // Helper classes
     private static class TestStats {
         int passCount = 0;
         int failCount = 0;
