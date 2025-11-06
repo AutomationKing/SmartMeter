@@ -47,53 +47,26 @@ public class FlakyTestAnalyzer implements TestExecutionListener {
     public void executionFinished(TestIdentifier testIdentifier, TestExecutionResult result) {
         if (!testIdentifier.isTest()) return;
 
-        // ------------------------------
-        // Generate proper test key
-        // ------------------------------
-
-        // Base scenario name (fallback)
-        String scenarioName = "Unnamed Test";
-
-        // Extract scenario/feature name from source
-        scenarioName = testIdentifier.getSource()
-                .map(Object::toString)
-                .map(src -> {
-                    if (src.contains("Feature:")) {
-                        int idx = src.indexOf("Feature:");
-                        return src.substring(idx + 8).split("\\\\|:")[0].trim();
-                    } else {
-                        return testIdentifier.getDisplayName();
-                    }
-                })
-                .orElse(testIdentifier.getDisplayName());
-
-        // Extract example values inside brackets (like customer=123)
-        String exampleValue = "";
-        if (testIdentifier.getDisplayName().contains("[")) {
-            int start = testIdentifier.getDisplayName().indexOf("[");
-            int end = testIdentifier.getDisplayName().indexOf("]", start);
-            if (start >= 0 && end > start) {
-                exampleValue = testIdentifier.getDisplayName().substring(start + 1, end);
-            }
-        }
-
-        // Feature file fallback
-        String featureFile = testIdentifier.getSource()
+        // ✅ Use feature file + line number from source (similar to rerun.txt) for unique test key
+        String featureLineInfo = testIdentifier.getSource()
                 .map(Object::toString)
                 .map(src -> {
                     int idx = src.indexOf("feature:");
-                    return idx >= 0 ? src.substring(idx + 8).split(":")[0].trim() : "unknown.feature";
-                }).orElse("unknown.feature");
+                    if (idx >= 0) {
+                        String pathLine = src.substring(idx + 8).trim();
+                        return pathLine.replace("file:", "");
+                    }
+                    return "unknown.feature";
+                })
+                .orElse("unknown.feature");
 
-        // Unique test key: scenario + feature + example value
-        String testKey = scenarioName + " | " + featureFile;
-        if (!exampleValue.isEmpty()) testKey += " | " + exampleValue;
+        String testKey = testIdentifier.getDisplayName() + " | " + featureLineInfo;
 
         // Execution timing
         Instant start = startTimes.getOrDefault(testIdentifier.getUniqueId(), Instant.now());
         Duration duration = Duration.between(start, Instant.now());
 
-        // Exact error message (truncated)
+        // Exact error message (truncated to 200 chars)
         String reason = result.getThrowable()
                 .map(Throwable::getMessage)
                 .map(msg -> msg != null ? msg : result.getThrowable().get().toString())
@@ -107,7 +80,6 @@ public class FlakyTestAnalyzer implements TestExecutionListener {
         // Mark as flaky if pattern matches OR previously passed at least once
         boolean isFlaky = isFlakyPattern(reason) || ("FAILED".equals(result.getStatus().toString()) && stats.passCount > 0);
 
-        // Log to history
         logToHistory(testKey, result.getStatus().toString(), duration.toMillis(), reason, isFlaky);
 
         // Update counters and list
