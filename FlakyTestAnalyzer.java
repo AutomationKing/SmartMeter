@@ -47,9 +47,10 @@ public class FlakyTestAnalyzer implements TestExecutionListener {
     public void executionFinished(TestIdentifier testIdentifier, TestExecutionResult result) {
         if (!testIdentifier.isTest()) return;
 
-        // Generate unique human-readable test key
+        // Base scenario name
         String scenarioName = testIdentifier.getDisplayName().split("Example")[0].trim();
 
+        // Feature file (fallback to "unknown.feature")
         String featureFile = testIdentifier.getSource()
                 .map(Object::toString)
                 .map(src -> {
@@ -58,6 +59,7 @@ public class FlakyTestAnalyzer implements TestExecutionListener {
                 })
                 .orElse("unknown.feature");
 
+        // Include example parameters to make the key unique
         String params = "";
         if (testIdentifier.getDisplayName().contains("[")) {
             int start = testIdentifier.getDisplayName().indexOf("[");
@@ -67,12 +69,14 @@ public class FlakyTestAnalyzer implements TestExecutionListener {
             }
         }
 
+        // Unique test key
         String testKey = scenarioName + " | " + featureFile + params;
 
+        // Execution timing
         Instant start = startTimes.getOrDefault(testIdentifier.getUniqueId(), Instant.now());
         Duration duration = Duration.between(start, Instant.now());
 
-        // Only exact error message, truncated if too long
+        // Exact error message (truncated if too long)
         String reason = result.getThrowable()
                 .map(Throwable::getMessage)
                 .map(msg -> msg != null ? msg : result.getThrowable().get().toString())
@@ -80,13 +84,15 @@ public class FlakyTestAnalyzer implements TestExecutionListener {
         int maxLength = 200;
         reason = reason.length() > maxLength ? reason.substring(0, maxLength) + "..." : reason;
 
+        // Get historical stats
         TestStats stats = getHistoricalStats(testKey);
 
+        // Mark as flaky if pattern matches OR previously passed at least once
         boolean isFlaky = isFlakyPattern(reason) || ("FAILED".equals(result.getStatus().toString()) && stats.passCount > 0);
 
         logToHistory(testKey, result.getStatus().toString(), duration.toMillis(), reason, isFlaky);
 
-        // Update counters
+        // Update counters and list
         totalTests++;
         if ("SUCCESSFUL".equals(result.getStatus().toString())) {
             totalPassed++;
