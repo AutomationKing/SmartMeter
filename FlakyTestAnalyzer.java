@@ -21,7 +21,7 @@ public class FlakyTestAnalyzer implements TestExecutionListener {
     private final File historyFile;
 
     public FlakyTestAnalyzer() {
-        // Store outside target so Maven clean doesn’t delete it
+        // Store test history outside target/
         this.historyFile = new File("test-history/test-history.json");
         if (!historyFile.getParentFile().exists()) {
             historyFile.getParentFile().mkdirs();
@@ -41,39 +41,38 @@ public class FlakyTestAnalyzer implements TestExecutionListener {
 
         String testName = testIdentifier.getDisplayName();
         Duration duration = Duration.between(startTimes.get(testName), Instant.now());
-
         String status = result.getStatus().toString();
         String reason = result.getThrowable()
                 .map(Throwable::toString)
                 .orElse("Passed");
 
         boolean isFlaky = isFlakyPattern(reason);
+        TestStats stats = getHistoricalStats(testName);
+        String lastPassDate = stats.lastPassedDate;
 
         logToHistory(testName, status, duration.toMillis(), reason, isFlaky);
-        printClassification(testName, status, reason, duration, isFlaky);
+        printSummary(testName, status, reason, duration, isFlaky, stats);
     }
 
-    // Detects common flaky failure patterns
+    // Detect known flaky indicators
     private boolean isFlakyPattern(String message) {
         return message.contains("TimeoutException") ||
                message.contains("NoSuchElementException") ||
                message.contains("StaleElementReferenceException") ||
                message.contains("ElementNotInteractableException") ||
                message.contains("ConnectException") ||
-               message.contains("AssertionError") && message.contains("URL");
+               (message.contains("AssertionError") && message.contains("URL"));
     }
 
     private void logToHistory(String testName, String status, long duration, String reason, boolean flakyLike) {
         try {
-            ObjectNode root;
-            if (historyFile.exists()) {
-                root = (ObjectNode) mapper.readTree(historyFile);
-            } else {
-                root = mapper.createObjectNode();
-                root.set("tests", mapper.createObjectNode());
-            }
+            ObjectNode root = historyFile.exists()
+                    ? (ObjectNode) mapper.readTree(historyFile)
+                    : mapper.createObjectNode();
 
+            if (!root.has("tests")) root.set("tests", mapper.createObjectNode());
             ObjectNode testsNode = (ObjectNode) root.get("tests");
+
             ArrayNode testHistory = testsNode.has(testName)
                     ? (ArrayNode) testsNode.get(testName)
                     : mapper.createArrayNode();
@@ -87,20 +86,64 @@ public class FlakyTestAnalyzer implements TestExecutionListener {
 
             testHistory.add(entry);
             testsNode.set(testName, testHistory);
-
             mapper.writerWithDefaultPrettyPrinter().writeValue(historyFile, root);
+
         } catch (IOException e) {
             e.printStackTrace();
         }
     }
 
-    private void printClassification(String testName, String status, String reason, Duration duration, boolean isFlaky) {
-        if (status.equals("SUCCESSFUL")) {
-            System.out.printf("✅ PASSED: %s (%d ms)%n", testName, duration.toMillis());
-        } else if (isFlaky) {
-            System.out.printf("⚠️  POSSIBLE FLAKY TEST: %s (%s)%n", testName, reason);
-        } else {
-            System.out.printf("❌ GENUINE FAILURE: %s (%s)%n", testName, reason);
+    private TestStats getHistoricalStats(String testName) {
+        TestStats stats = new TestStats();
+        if (!historyFile.exists()) return stats;
+
+        try {
+            ObjectNode root = (ObjectNode) mapper.readTree(historyFile);
+            ObjectNode testsNode = (ObjectNode) root.get("tests");
+            if (testsNode == null || !testsNode.has(testName)) return stats;
+
+            ArrayNode history = (ArrayNode) testsNode.get(testName);
+            for (int i = 0; i < history.size(); i++) {
+                ObjectNode entry = (ObjectNode) history.get(i);
+                String status = entry.get("status").asText();
+                if ("SUCCESSFUL".equals(status)) {
+                    stats.passCount++;
+                    stats.lastPassedDate = entry.get("timestamp").asText();
+                } else {
+                    stats.failCount++;
+                }
+            }
+        } catch (IOException e) {
+            e.printStackTrace();
         }
+        return stats;
+    }
+
+    private void printSummary(String testName, String status, String reason, Duration duration,
+                              boolean isFlaky, TestStats stats) {
+
+        String statsSummary = String.format(" (History: %d passes / %d fails)", stats.passCount, stats.failCount);
+
+        if (status.equals("SUCCESSFUL")) {
+            System.out.printf("✅ PASSED: %s (%d ms)%s%n", testName, duration.toMillis(), statsSummary);
+        } else if (isFlaky) {
+            System.out.printf("⚠️  POSSIBLE FLAKY TEST: %s%n", testName);
+            System.out.printf("   ↪ Reason: %s%n", reason);
+            if (stats.lastPassedDate != null)
+                System.out.printf("   ↪ Previously PASSED on: %s%n", stats.lastPassedDate);
+            System.out.println("   ↪" + statsSummary);
+        } else {
+            System.out.printf("❌ GENUINE FAILURE: %s%n", testName);
+            System.out.printf("   ↪ Reason: %s%n", reason);
+            if (stats.lastPassedDate != null)
+                System.out.printf("   ↪ Previously PASSED on: %s%n", stats.lastPassedDate);
+            System.out.println("   ↪" + statsSummary);
+        }
+    }
+
+    private static class TestStats {
+        int passCount = 0;
+        int failCount = 0;
+        String lastPassedDate = null;
     }
 }
