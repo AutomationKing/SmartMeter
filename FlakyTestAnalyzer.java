@@ -48,7 +48,7 @@ public class FlakyTestAnalyzer implements TestExecutionListener {
         if (!testIdentifier.isTest()) return;
 
         // ------------------------------
-        // ✅ Extract proper test key
+        // ✅ Generate proper test key
         // ------------------------------
         String displayName = testIdentifier.getDisplayName();
 
@@ -65,17 +65,8 @@ public class FlakyTestAnalyzer implements TestExecutionListener {
             }
         }
 
-        // Feature file (fallback to unknown.feature)
-        String featureFile = testIdentifier.getSource()
-                .map(Object::toString)
-                .map(src -> {
-                    int idx = src.indexOf("feature:");
-                    return idx >= 0 ? src.substring(idx + 8).split(":")[0] : "unknown.feature";
-                })
-                .orElse("unknown.feature");
-
-        // Combine scenario + example + feature
-        String testKey = scenarioName + " | " + featureFile + (exampleValue.isEmpty() ? "" : " | " + exampleValue);
+        // Unique test key
+        String testKey = scenarioName + (exampleValue.isEmpty() ? "" : " | " + exampleValue);
 
         // ------------------------------
         // Execution timing
@@ -83,7 +74,7 @@ public class FlakyTestAnalyzer implements TestExecutionListener {
         Instant start = startTimes.getOrDefault(testIdentifier.getUniqueId(), Instant.now());
         Duration duration = Duration.between(start, Instant.now());
 
-        // Exact error message
+        // Exact error message (truncated)
         String reason = result.getThrowable()
                 .map(Throwable::getMessage)
                 .map(msg -> msg != null ? msg : result.getThrowable().get().toString())
@@ -94,10 +85,9 @@ public class FlakyTestAnalyzer implements TestExecutionListener {
         // Historical stats
         TestStats stats = getHistoricalStats(testKey);
 
-        // Flaky detection
+        // Mark as flaky if pattern matches OR previously passed at least once
         boolean isFlaky = isFlakyPattern(reason) || ("FAILED".equals(result.getStatus().toString()) && stats.passCount > 0);
 
-        // Log to history
         logToHistory(testKey, result.getStatus().toString(), duration.toMillis(), reason, isFlaky);
 
         // Update counters and list
@@ -119,6 +109,9 @@ public class FlakyTestAnalyzer implements TestExecutionListener {
         generateHtmlReport();
     }
 
+    // ------------------------------
+    // Detect known flaky indicators
+    // ------------------------------
     private boolean isFlakyPattern(String message) {
         return message.contains("TimeoutException") ||
                message.contains("NoSuchElementException") ||
@@ -129,6 +122,9 @@ public class FlakyTestAnalyzer implements TestExecutionListener {
                (message.contains("AssertionError") && message.contains("URL"));
     }
 
+    // ------------------------------
+    // Log test history
+    // ------------------------------
     private void logToHistory(String testKey, String status, long duration, String reason, boolean flakyLike) {
         try {
             ObjectNode root = historyFile.exists()
@@ -158,6 +154,9 @@ public class FlakyTestAnalyzer implements TestExecutionListener {
         }
     }
 
+    // ------------------------------
+    // Get historical stats for test
+    // ------------------------------
     private TestStats getHistoricalStats(String testKey) {
         TestStats stats = new TestStats();
         if (!historyFile.exists()) return stats;
@@ -184,19 +183,22 @@ public class FlakyTestAnalyzer implements TestExecutionListener {
         return stats;
     }
 
+    // ------------------------------
+    // Generate HTML report
+    // ------------------------------
     private void generateHtmlReport() {
         try {
             StringBuilder html = new StringBuilder();
             html.append("<!DOCTYPE html><html lang='en'><head><meta charset='UTF-8'>")
                 .append("<title>Test Report</title>")
                 .append("<style>")
-                .append("body {font-family: Arial, sans-serif; margin: 20px;}") 
-                .append("table {border-collapse: collapse; width: 100%;}")
-                .append("th, td {border: 1px solid #ccc; padding: 8px;}")
-                .append("th {background:#555; color:#fff;}")
-                .append(".PASSED {background:#d4edda;}")
-                .append(".FLAKY {background:#fff3cd;}")
-                .append(".FAILED {background:#f8d7da;}")
+                .append("body {font-family: Arial, sans-serif; margin: 20px;} ")
+                .append("table {border-collapse: collapse; width: 100%;} ")
+                .append("th, td {border: 1px solid #ccc; padding: 8px;} ")
+                .append("th {background:#555; color:#fff;} ")
+                .append(".PASSED {background:#d4edda;} ")
+                .append(".FLAKY {background:#fff3cd;} ")
+                .append(".FAILED {background:#f8d7da;} ")
                 .append("</style></head><body>");
 
             html.append("<h1>Test Execution Report</h1>");
@@ -230,6 +232,9 @@ public class FlakyTestAnalyzer implements TestExecutionListener {
         }
     }
 
+    // ------------------------------
+    // Internal helper classes
+    // ------------------------------
     private static class TestStats {
         int passCount = 0;
         int failCount = 0;
