@@ -47,10 +47,25 @@ public class FlakyTestAnalyzer implements TestExecutionListener {
     public void executionFinished(TestIdentifier testIdentifier, TestExecutionResult result) {
         if (!testIdentifier.isTest()) return;
 
-        // Base scenario name
-        String scenarioName = testIdentifier.getDisplayName().split("Example")[0].trim();
+        // ------------------------------
+        // ✅ Extract proper test key
+        // ------------------------------
+        String displayName = testIdentifier.getDisplayName();
 
-        // Feature file (fallback to "unknown.feature")
+        // Scenario name (before Example)
+        String scenarioName = displayName.split("Example")[0].trim();
+
+        // Extract example values inside brackets
+        String exampleValue = "";
+        if (displayName.contains("[")) {
+            int start = displayName.indexOf("[");
+            int end = displayName.indexOf("]", start);
+            if (start >= 0 && end > start) {
+                exampleValue = displayName.substring(start + 1, end); // e.g., "customer=123"
+            }
+        }
+
+        // Feature file (fallback to unknown.feature)
         String featureFile = testIdentifier.getSource()
                 .map(Object::toString)
                 .map(src -> {
@@ -59,24 +74,16 @@ public class FlakyTestAnalyzer implements TestExecutionListener {
                 })
                 .orElse("unknown.feature");
 
-        // Include example parameters to make the key unique
-        String params = "";
-        if (testIdentifier.getDisplayName().contains("[")) {
-            int start = testIdentifier.getDisplayName().indexOf("[");
-            int end = testIdentifier.getDisplayName().indexOf("]", start);
-            if (start >= 0 && end > start) {
-                params = " | " + testIdentifier.getDisplayName().substring(start + 1, end);
-            }
-        }
+        // Combine scenario + example + feature
+        String testKey = scenarioName + " | " + featureFile + (exampleValue.isEmpty() ? "" : " | " + exampleValue);
 
-        // Unique test key
-        String testKey = scenarioName + " | " + featureFile + params;
-
+        // ------------------------------
         // Execution timing
+        // ------------------------------
         Instant start = startTimes.getOrDefault(testIdentifier.getUniqueId(), Instant.now());
         Duration duration = Duration.between(start, Instant.now());
 
-        // Exact error message (truncated if too long)
+        // Exact error message
         String reason = result.getThrowable()
                 .map(Throwable::getMessage)
                 .map(msg -> msg != null ? msg : result.getThrowable().get().toString())
@@ -84,12 +91,13 @@ public class FlakyTestAnalyzer implements TestExecutionListener {
         int maxLength = 200;
         reason = reason.length() > maxLength ? reason.substring(0, maxLength) + "..." : reason;
 
-        // Get historical stats
+        // Historical stats
         TestStats stats = getHistoricalStats(testKey);
 
-        // Mark as flaky if pattern matches OR previously passed at least once
+        // Flaky detection
         boolean isFlaky = isFlakyPattern(reason) || ("FAILED".equals(result.getStatus().toString()) && stats.passCount > 0);
 
+        // Log to history
         logToHistory(testKey, result.getStatus().toString(), duration.toMillis(), reason, isFlaky);
 
         // Update counters and list
@@ -182,7 +190,7 @@ public class FlakyTestAnalyzer implements TestExecutionListener {
             html.append("<!DOCTYPE html><html lang='en'><head><meta charset='UTF-8'>")
                 .append("<title>Test Report</title>")
                 .append("<style>")
-                .append("body {font-family: Arial, sans-serif; margin: 20px;}")
+                .append("body {font-family: Arial, sans-serif; margin: 20px;}") 
                 .append("table {border-collapse: collapse; width: 100%;}")
                 .append("th, td {border: 1px solid #ccc; padding: 8px;}")
                 .append("th {background:#555; color:#fff;}")
