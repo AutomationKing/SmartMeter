@@ -8,15 +8,11 @@ import org.junit.platform.launcher.TestIdentifier;
 import org.junit.platform.launcher.TestExecutionResult;
 import org.junit.platform.launcher.TestPlan;
 
-import java.io.BufferedWriter;
-import java.io.File;
-import java.io.FileWriter;
+import java.io.*;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDateTime;
 import java.util.*;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 public class FlakyTestAnalyzer implements TestExecutionListener {
 
@@ -30,11 +26,29 @@ public class FlakyTestAnalyzer implements TestExecutionListener {
     private int totalFailures = 0;
 
     private final List<TestSummary> allTestsList = new ArrayList<>();
+    private final List<String> capturedConsoleLines = new ArrayList<>();
 
-    // Pattern to extract FailedScenarios line from console logs
-    private static final Pattern FAILED_SCENARIO_PATTERN = Pattern.compile("classpath:.*\\.feature:\\d+");
+    // Redirect System.out to capture console logs
+    private final PrintStream originalOut = System.out;
+    private final PrintStream capturingOut = new PrintStream(new OutputStream() {
+        private final StringBuilder sb = new StringBuilder();
+        @Override
+        public void write(int b) {
+            if (b == '\n') {
+                capturedConsoleLines.add(sb.toString());
+                originalOut.println(sb.toString());
+                sb.setLength(0);
+            } else {
+                sb.append((char) b);
+            }
+        }
+    }, true);
 
     public FlakyTestAnalyzer() {
+        // Capture console output
+        System.setOut(capturingOut);
+
+        // Store test history outside target/
         this.historyFile = new File("test-history/test-history.json");
         if (!historyFile.getParentFile().exists()) {
             historyFile.getParentFile().mkdirs();
@@ -52,54 +66,40 @@ public class FlakyTestAnalyzer implements TestExecutionListener {
     public void executionFinished(TestIdentifier testIdentifier, TestExecutionResult result) {
         if (!testIdentifier.isTest()) return;
 
-        // ✅ Generate a test key based on console log FailedScenarios if available
-        String testKey = getFailedScenarioKeyFromDisplayName(testIdentifier.getDisplayName());
+        // Default test name
+        String testKey = testIdentifier.getDisplayName();
 
-        if (testKey.isEmpty()) {
-            // fallback to feature name + scenario name
-            testKey = testIdentifier.getDisplayName();
-            String featureFile = testIdentifier.getSource()
-                    .map(Object::toString)
-                    .map(src -> {
-                        int idx = src.indexOf("feature:");
-                        return idx >= 0 ? src.substring(idx + 8).split(":")[0] : "unknown.feature";
-                    })
-                    .orElse("unknown.feature");
-            testKey += " | " + featureFile;
-        }
-
-        // Include example parameters to make the key unique
-        String params = "";
-        if (testIdentifier.getDisplayName().contains("[")) {
-            int start = testIdentifier.getDisplayName().indexOf("[");
-            int end = testIdentifier.getDisplayName().indexOf("]", start);
-            if (start >= 0 && end > start) {
-                params = " | " + testIdentifier.getDisplayName().substring(start + 1, end);
+        // If failed, try to find feature:line from captured console logs
+        if (result.getStatus() == TestExecutionResult.Status.FAILED) {
+            for (String line : capturedConsoleLines) {
+                if (line.startsWith("Failed scenarioes:") && line.contains(".feature:")) {
+                    testKey = line.replace("Failed scenarioes:", "").trim();
+                    break;
+                }
             }
         }
-        testKey += params;
 
         // Execution timing
         Instant start = startTimes.getOrDefault(testIdentifier.getUniqueId(), Instant.now());
         Duration duration = Duration.between(start, Instant.now());
 
-        // Exact error message (truncated if too long)
+        // Exact error message (truncated if long)
         String reason = result.getThrowable()
                 .map(Throwable::getMessage)
                 .map(msg -> msg != null ? msg : result.getThrowable().get().toString())
                 .orElse("Passed");
-        int maxLength = 200;
-        reason = reason.length() > maxLength ? reason.substring(0, maxLength) + "..." : reason;
+        if (reason.length() > 200) reason = reason.substring(0, 200) + "...";
 
-        // Get historical stats
+        // Historical stats
         TestStats stats = getHistoricalStats(testKey);
 
-        // Mark as flaky if pattern matches OR previously passed at least once
-        boolean isFlaky = isFlakyPattern(reason) || ("FAILED".equals(result.getStatus().toString()) && stats.passCount > 0);
+        // Flaky detection: known pattern or previously passed at least once
+        boolean isFlaky = isFlakyPattern(reason) ||
+                          ("FAILED".equals(result.getStatus().toString()) && stats.passCount > 0);
 
         logToHistory(testKey, result.getStatus().toString(), duration.toMillis(), reason, isFlaky);
 
-        // Update counters and list
+        // Update counters & list
         totalTests++;
         if ("SUCCESSFUL".equals(result.getStatus().toString())) {
             totalPassed++;
@@ -116,6 +116,8 @@ public class FlakyTestAnalyzer implements TestExecutionListener {
     @Override
     public void testPlanExecutionFinished(TestPlan testPlan) {
         generateHtmlReport();
+        // Restore original System.out
+        System.setOut(originalOut);
     }
 
     private boolean isFlakyPattern(String message) {
@@ -126,14 +128,6 @@ public class FlakyTestAnalyzer implements TestExecutionListener {
                message.contains("ConnectException") ||
                message.contains("ElementNotVisibleException") ||
                (message.contains("AssertionError") && message.contains("URL"));
-    }
-
-    private String getFailedScenarioKeyFromDisplayName(String displayName) {
-        Matcher matcher = FAILED_SCENARIO_PATTERN.matcher(displayName);
-        if (matcher.find()) {
-            return matcher.group();
-        }
-        return "";
     }
 
     private void logToHistory(String testKey, String status, long duration, String reason, boolean flakyLike) {
@@ -215,11 +209,11 @@ public class FlakyTestAnalyzer implements TestExecutionListener {
 
             for (TestSummary t : allTestsList) {
                 html.append("<tr class='").append(t.status).append("'>")
-                        .append("<td>").append(t.name).append("</td>")
-                        .append("<td>").append(t.status).append("</td>")
-                        .append("<td>").append(t.lastPassDate == null ? "-" : t.lastPassDate).append("</td>")
-                        .append("<td>").append(t.lastFailureReason).append("</td>")
-                        .append("</tr>");
+                    .append("<td>").append(t.name).append("</td>")
+                    .append("<td>").append(t.status).append("</td>")
+                    .append("<td>").append(t.lastPassDate == null ? "-" : t.lastPassDate).append("</td>")
+                    .append("<td>").append(t.lastFailureReason).append("</td>")
+                    .append("</tr>");
             }
 
             html.append("</table></body></html>");
