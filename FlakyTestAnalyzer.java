@@ -8,9 +8,9 @@ import org.junit.platform.launcher.TestIdentifier;
 import org.junit.platform.launcher.TestExecutionResult;
 import org.junit.platform.launcher.TestPlan;
 
+import java.io.BufferedWriter;
 import java.io.File;
-import java.io.IOException;
-import java.nio.file.Files;
+import java.io.FileWriter;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDateTime;
@@ -51,30 +51,42 @@ public class FlakyTestAnalyzer implements TestExecutionListener {
     public void executionFinished(TestIdentifier testIdentifier, TestExecutionResult result) {
         if (!testIdentifier.isTest()) return;
 
-        // Generate consistent test key with feature line for scenario outlines
+        // Generate unique key: displayName + feature line + example values
         String featureLine = testIdentifier.getSource()
                 .map(Object::toString)
                 .map(src -> {
                     int idx = src.indexOf("feature:");
                     return idx >= 0 ? src.substring(idx) : "";
                 }).orElse("");
+
         String testKey = testIdentifier.getDisplayName() + " " + featureLine;
+
+        // Append example values from displayName if present (Cucumber sometimes adds [customer=123])
+        String displayName = testIdentifier.getDisplayName();
+        if(displayName.contains("[")) {
+            testKey += " " + displayName.substring(displayName.indexOf("["));
+        }
 
         Instant start = startTimes.getOrDefault(testIdentifier.getDisplayName(), Instant.now());
         Duration duration = Duration.between(start, Instant.now());
 
-        String status = result.getStatus().toString();
-        String reason = result.getThrowable().map(Throwable::toString).orElse("Passed");
+        // Only exact exception message, truncated if too long
+        String reason = result.getThrowable()
+                .map(Throwable::getMessage)
+                .map(msg -> msg != null ? msg : result.getThrowable().get().toString())
+                .orElse("Passed");
+        int maxLength = 200;
+        reason = reason.length() > maxLength ? reason.substring(0, maxLength) + "..." : reason;
 
         boolean isFlaky = isFlakyPattern(reason);
         TestStats stats = getHistoricalStats(testKey);
         String lastPassDate = stats.lastPassedDate;
 
-        logToHistory(testKey, status, duration.toMillis(), reason, isFlaky);
-        printSummary(testKey, status, reason, duration, isFlaky, stats);
+        logToHistory(testKey, result.getStatus().toString(), duration.toMillis(), reason, isFlaky);
+        printSummary(testKey, result.getStatus().toString(), reason, duration, isFlaky, stats);
 
         totalTests++;
-        if ("SUCCESSFUL".equals(status)) {
+        if ("SUCCESSFUL".equals(result.getStatus().toString())) {
             totalPassed++;
             passedTests.add(new TestSummary(testKey, "-", lastPassDate));
         } else if (isFlaky) {
@@ -125,7 +137,7 @@ public class FlakyTestAnalyzer implements TestExecutionListener {
             testsNode.set(testKey, testHistory);
             mapper.writerWithDefaultPrettyPrinter().writeValue(historyFile, root);
 
-        } catch (IOException e) {
+        } catch (Exception e) {
             e.printStackTrace();
         }
     }
@@ -150,7 +162,7 @@ public class FlakyTestAnalyzer implements TestExecutionListener {
                     stats.failCount++;
                 }
             }
-        } catch (IOException e) {
+        } catch (Exception e) {
             e.printStackTrace();
         }
         return stats;
@@ -173,7 +185,7 @@ public class FlakyTestAnalyzer implements TestExecutionListener {
         }
     }
 
-    // ✅ Generate HTML report with all tests
+    // ✅ Generate HTML report
     private void generateHtmlReport() {
         try {
             StringBuilder html = new StringBuilder();
@@ -226,7 +238,10 @@ public class FlakyTestAnalyzer implements TestExecutionListener {
 
             File reportFile = new File("test-history/test-report.html");
             if (!reportFile.getParentFile().exists()) reportFile.getParentFile().mkdirs();
-            Files.writeString(reportFile.toPath(), html.toString());
+
+            try (BufferedWriter writer = new BufferedWriter(new FileWriter(reportFile))) {
+                writer.write(html.toString());
+            }
 
             System.out.println("✅ HTML Test Report generated at: " + reportFile.getAbsolutePath());
         } catch (Exception e) {
