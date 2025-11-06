@@ -4,130 +4,80 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.platform.launcher.TestExecutionListener;
-import org.junit.platform.launcher.TestIdentifier;
-import org.junit.platform.launcher.TestExecutionResult;
 import org.junit.platform.launcher.TestPlan;
 
 import java.io.*;
-import java.time.Duration;
-import java.time.Instant;
 import java.time.LocalDateTime;
 import java.util.*;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 public class FlakyTestAnalyzer implements TestExecutionListener {
 
-    private final Map<String, Instant> startTimes = new HashMap<>();
     private final ObjectMapper mapper = new ObjectMapper();
     private final File historyFile;
-
-    private int totalTests = 0;
-    private int totalPassed = 0;
-    private int totalFlaky = 0;
-    private int totalFailures = 0;
-
     private final List<TestSummary> allTestsList = new ArrayList<>();
-    private final List<String> capturedConsoleLines = new ArrayList<>();
+    private int totalTests = 0, totalPassed = 0, totalFlaky = 0, totalFailures = 0;
 
-    // Redirect System.out to capture console logs
+    // Capture console output
+    private final ByteArrayOutputStream consoleBuffer = new ByteArrayOutputStream();
     private final PrintStream originalOut = System.out;
-    private final PrintStream capturingOut = new PrintStream(new OutputStream() {
-        private final StringBuilder sb = new StringBuilder();
-        @Override
-        public void write(int b) {
-            if (b == '\n') {
-                capturedConsoleLines.add(sb.toString());
-                originalOut.println(sb.toString());
-                sb.setLength(0);
-            } else {
-                sb.append((char) b);
-            }
-        }
-    }, true);
 
     public FlakyTestAnalyzer() {
-        // Capture console output
-        System.setOut(capturingOut);
-
-        // Store test history outside target/
         this.historyFile = new File("test-history/test-history.json");
-        if (!historyFile.getParentFile().exists()) {
-            historyFile.getParentFile().mkdirs();
-        }
-    }
+        if (!historyFile.getParentFile().exists()) historyFile.getParentFile().mkdirs();
 
-    @Override
-    public void executionStarted(TestIdentifier testIdentifier) {
-        if (testIdentifier.isTest()) {
-            startTimes.put(testIdentifier.getUniqueId(), Instant.now());
-        }
-    }
-
-    @Override
-    public void executionFinished(TestIdentifier testIdentifier, TestExecutionResult result) {
-        if (!testIdentifier.isTest()) return;
-
-        // Default test name
-        String testKey = testIdentifier.getDisplayName();
-
-        // If failed, try to find feature:line from captured console logs
-        if (result.getStatus() == TestExecutionResult.Status.FAILED) {
-            for (String line : capturedConsoleLines) {
-                if (line.startsWith("Failed scenarioes:") && line.contains(".feature:")) {
-                    testKey = line.replace("Failed scenarioes:", "").trim();
-                    break;
-                }
-            }
-        }
-
-        // Execution timing
-        Instant start = startTimes.getOrDefault(testIdentifier.getUniqueId(), Instant.now());
-        Duration duration = Duration.between(start, Instant.now());
-
-        // Exact error message (truncated if long)
-        String reason = result.getThrowable()
-                .map(Throwable::getMessage)
-                .map(msg -> msg != null ? msg : result.getThrowable().get().toString())
-                .orElse("Passed");
-        if (reason.length() > 200) reason = reason.substring(0, 200) + "...";
-
-        // Historical stats
-        TestStats stats = getHistoricalStats(testKey);
-
-        // Flaky detection: known pattern or previously passed at least once
-        boolean isFlaky = isFlakyPattern(reason) ||
-                          ("FAILED".equals(result.getStatus().toString()) && stats.passCount > 0);
-
-        logToHistory(testKey, result.getStatus().toString(), duration.toMillis(), reason, isFlaky);
-
-        // Update counters & list
-        totalTests++;
-        if ("SUCCESSFUL".equals(result.getStatus().toString())) {
-            totalPassed++;
-            allTestsList.add(new TestSummary(testKey, "-", stats.lastPassedDate, "PASSED"));
-        } else if (isFlaky) {
-            totalFlaky++;
-            allTestsList.add(new TestSummary(testKey, reason, stats.lastPassedDate, "FLAKY"));
-        } else {
-            totalFailures++;
-            allTestsList.add(new TestSummary(testKey, reason, stats.lastPassedDate, "FAILED"));
-        }
+        // Redirect console output to buffer
+        System.setOut(new PrintStream(new TeeOutputStream(originalOut, consoleBuffer)));
     }
 
     @Override
     public void testPlanExecutionFinished(TestPlan testPlan) {
-        generateHtmlReport();
-        // Restore original System.out
+        // Restore original console
         System.setOut(originalOut);
+
+        try {
+            String logs = consoleBuffer.toString();
+            parseFailedScenarios(logs);
+            generateHtmlReport();
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
     }
 
-    private boolean isFlakyPattern(String message) {
-        return message.contains("TimeoutException") ||
-               message.contains("NoSuchElementException") ||
-               message.contains("StaleElementReferenceException") ||
-               message.contains("ElementNotInteractableException") ||
-               message.contains("ConnectException") ||
-               message.contains("ElementNotVisibleException") ||
-               (message.contains("AssertionError") && message.contains("URL"));
+    // Parse failed scenarios from console logs
+    private void parseFailedScenarios(String logs) {
+        // Pattern matches: classpath:...feature:LINE
+        Pattern pattern = Pattern.compile("classpath:[^\\s]+\\.feature:\\d+");
+        Matcher matcher = pattern.matcher(logs);
+
+        Set<String> uniqueTests = new LinkedHashSet<>(); // preserve order
+
+        while (matcher.find()) {
+            String testName = matcher.group();
+            uniqueTests.add(testName);
+        }
+
+        for (String testName : uniqueTests) {
+            // Check historical stats
+            TestStats stats = getHistoricalStats(testName);
+
+            // Determine if flaky
+            boolean isFlaky = stats.passCount > 0;
+
+            // Update counters
+            totalTests++;
+            if (isFlaky) {
+                totalFlaky++;
+                allTestsList.add(new TestSummary(testName, "Failed but previously passed", stats.lastPassedDate, "FLAKY"));
+            } else {
+                totalFailures++;
+                allTestsList.add(new TestSummary(testName, "Failed", stats.lastPassedDate, "FAILED"));
+            }
+
+            // Log to history
+            logToHistory(testName, isFlaky ? "FLAKY" : "FAILED", 0, isFlaky ? "Failed but previously passed" : "Failed", isFlaky);
+        }
     }
 
     private void logToHistory(String testKey, String status, long duration, String reason, boolean flakyLike) {
@@ -191,18 +141,13 @@ public class FlakyTestAnalyzer implements TestExecutionListener {
             html.append("<!DOCTYPE html><html lang='en'><head><meta charset='UTF-8'>")
                 .append("<title>Test Report</title>")
                 .append("<style>")
-                .append("body {font-family: Arial, sans-serif; margin: 20px;}") 
-                .append("table {border-collapse: collapse; width: 100%;}")
-                .append("th, td {border: 1px solid #ccc; padding: 8px;}") 
-                .append("th {background:#555; color:#fff;}") 
-                .append(".PASSED {background:#d4edda;}") 
-                .append(".FLAKY {background:#fff3cd;}") 
-                .append(".FAILED {background:#f8d7da;}") 
+                .append("body {font-family: Arial, sans-serif; margin: 20px;} table {border-collapse: collapse; width: 100%;}")
+                .append("th, td {border: 1px solid #ccc; padding: 8px;} th {background:#555; color:#fff;}")
+                .append(".PASSED {background:#d4edda;} .FLAKY {background:#fff3cd;} .FAILED {background:#f8d7da;}")
                 .append("</style></head><body>");
 
             html.append("<h1>Test Execution Report</h1>");
-            html.append(String.format("<p>Total: %d | Passed: %d | Flaky: %d | Failed: %d</p>",
-                    totalTests, totalPassed, totalFlaky, totalFailures));
+            html.append(String.format("<p>Total: %d | Flaky: %d | Failed: %d</p>", totalTests, totalFlaky, totalFailures));
 
             html.append("<table>");
             html.append("<tr><th>Test Name</th><th>Status</th><th>Last Passed Date</th><th>Last Failure Reason</th></tr>");
@@ -225,15 +170,13 @@ public class FlakyTestAnalyzer implements TestExecutionListener {
             }
 
             System.out.println("✅ HTML Test Report generated at: " + reportFile.getAbsolutePath());
-
         } catch (Exception e) {
             e.printStackTrace();
         }
     }
 
     private static class TestStats {
-        int passCount = 0;
-        int failCount = 0;
+        int passCount = 0, failCount = 0;
         String lastPassedDate = null;
     }
 
@@ -248,6 +191,23 @@ public class FlakyTestAnalyzer implements TestExecutionListener {
             this.lastFailureReason = reason;
             this.lastPassDate = lastPassDate;
             this.status = status;
+        }
+    }
+
+    // Helper class to tee console output
+    private static class TeeOutputStream extends OutputStream {
+        private final OutputStream out1;
+        private final OutputStream out2;
+
+        TeeOutputStream(OutputStream out1, OutputStream out2) {
+            this.out1 = out1;
+            this.out2 = out2;
+        }
+
+        @Override
+        public void write(int b) throws IOException {
+            out1.write(b);
+            out2.write(b);
         }
     }
 }
