@@ -177,63 +177,79 @@ public class FlakyTestAnalyzer implements TestExecutionListener {
     }
 
     private void generateHtmlReport() throws IOException {
-        StringBuilder html = new StringBuilder();
-        html.append("<!DOCTYPE html><html lang='en'><head><meta charset='UTF-8'>")
-            .append("<title>Test Report</title><style>")
-            .append("body{font-family:Arial;margin:20px;}table{border-collapse:collapse;width:100%;}")
-            .append("th,td{border:1px solid #ccc;padding:8px;text-align:left;}th{background:#333;color:#fff;}")
-            .append(".PASSED{background:#d4edda}.FLAKY{background:#fff3cd}.FAILED{background:#f8d7da}")
-            .append("button{margin-right:5px;padding:5px 10px;border:none;border-radius:4px;cursor:pointer;}")
-            .append("</style></head><body>");
+    StringBuilder html = new StringBuilder();
+    html.append("<!DOCTYPE html><html lang='en'><head><meta charset='UTF-8'>")
+        .append("<title>Test Report</title><style>")
+        .append("body{font-family:Arial;margin:20px;}table{border-collapse:collapse;width:100%;}")
+        .append("th,td{border:1px solid #ccc;padding:8px;text-align:left;}th{background:#333;color:#fff;}")
+        .append(".PASSED{background:#d4edda}.FLAKY{background:#fff3cd}.FAILED{background:#f8d7da}")
+        .append("button{margin-right:5px;padding:5px 10px;border:none;border-radius:4px;cursor:pointer;}")
+        .append("</style></head><body>");
 
-        html.append("<h1>Test Execution Report</h1>");
-        html.append(String.format("<p><b>Total:</b> %d | <b>Passed:</b> %d | <b>Flaky:</b> %d | <b>Failed:</b> %d</p>",
-                total, passed, flaky, failed));
+    html.append("<h1>Test Execution Report</h1>");
+    html.append(String.format("<p><b>Total:</b> %d | <b>Passed:</b> %d | <b>Flaky:</b> %d | <b>Failed:</b> %d</p>",
+            total, passed, flaky, failed));
 
-        // Filter buttons
-        html.append("<p>")
-            .append("<button onclick=\"filter('ALL')\">All</button>")
-            .append("<button onclick=\"filter('PASSED')\">Passed</button>")
-            .append("<button onclick=\"filter('FLAKY')\">Flaky</button>")
-            .append("<button onclick=\"filter('FAILED')\">Failed</button>")
-            .append("</p>");
+    // Filter buttons
+    html.append("<p>")
+        .append("<button onclick=\"filter('ALL')\">All</button>")
+        .append("<button onclick=\"filter('PASSED')\">Passed</button>")
+        .append("<button onclick=\"filter('FLAKY')\">Flaky</button>")
+        .append("<button onclick=\"filter('FAILED')\">Failed</button>")
+        .append("</p>");
 
-        // Chart
-        html.append("<canvas id='summaryChart' width='400' height='200'></canvas>")
-            .append("<script src='https://cdn.jsdelivr.net/npm/chart.js'></script>")
-            .append("<script>")
-            .append("new Chart(document.getElementById('summaryChart'), {type:'pie',data:{labels:['Passed','Flaky','Failed'],")
-            .append("datasets:[{data:[").append(passed).append(",").append(flaky).append(",").append(failed).append("],")
-            .append("backgroundColor:['#28a745','#ffc107','#dc3545']}]} });</script>");
+    // Responsive Pie Chart
+    html.append("<div style='width:400px; max-width:50%; height:400px; margin-bottom:20px;'>")
+        .append("<canvas id='summaryChart'></canvas>")
+        .append("</div>")
+        .append("<script src='https://cdn.jsdelivr.net/npm/chart.js'></script>")
+        .append("<script>")
+        .append("const ctx = document.getElementById('summaryChart').getContext('2d');")
+        .append("new Chart(ctx, {")
+        .append("type: 'pie',")
+        .append("data: {")
+        .append("labels: ['Passed', 'Flaky', 'Failed'],")
+        .append("datasets: [{")
+        .append("data: [").append(passed).append(",").append(flaky).append(",").append(failed).append("],")
+        .append("backgroundColor: ['#28a745','#ffc107','#dc3545']")
+        .append("}]")
+        .append("},")
+        .append("options: {")
+        .append("responsive: true,")
+        .append("maintainAspectRatio: false")
+        .append("}")
+        .append("});")
+        .append("</script>");
 
-        // Table
-        html.append("<table><tr><th>Test</th><th>Status</th><th>Last Passed</th><th>Reason</th><th>Pass %</th><th>Trend</th></tr>");
-        for (TestSummary s : thisRunSummaries) {
-            JsonNode history = testsNode.get(s.name);
-            double passRate = s.passCount + s.failCount == 0 ? 0 : (s.passCount * 100.0 / (s.passCount + s.failCount));
-            String trend = getRecentHistoryTrend(history, 5);
-            html.append("<tr class='").append(s.status).append("'>")
-                .append("<td>").append(escapeHtml(s.name)).append("</td>")
-                .append("<td>").append(s.status).append("</td>")
-                .append("<td>").append(s.lastPassDate == null ? "-" : s.lastPassDate).append("</td>")
-                .append("<td>").append(escapeHtml(s.lastFailureReason == null ? "-" : s.lastFailureReason)).append("</td>")
-                .append("<td>").append(String.format("%.1f%%", passRate)).append("</td>")
-                .append("<td>").append(trend).append("</td>")
-                .append("</tr>");
-        }
-        html.append("</table>");
-
-        // JS Filter
-        html.append("<script>")
-            .append("function filter(status){document.querySelectorAll('tr').forEach(tr=>{")
-            .append("if(!tr.classList.contains(status)&&status!=='ALL'&&tr.classList.length)tr.style.display='none';")
-            .append("else tr.style.display='';});}")
-            .append("</script>");
-
-        html.append("</body></html>");
-        if (!reportFile.getParentFile().exists()) reportFile.getParentFile().mkdirs();
-        Files.writeString(Path.of(reportFile.toURI()), html.toString());
+    // Table
+    html.append("<table><tr><th>Test</th><th>Status</th><th>Last Passed</th><th>Reason</th><th>Pass %</th><th>Trend</th></tr>");
+    for (TestSummary s : thisRunSummaries) {
+        JsonNode history = testsNode.get(s.name);
+        double passRate = s.passCount + s.failCount == 0 ? 0 : (s.passCount * 100.0 / (s.passCount + s.failCount));
+        String trend = getRecentHistoryTrend(history, 5);
+        html.append("<tr class='").append(s.status).append("'>")
+            .append("<td>").append(escapeHtml(s.name)).append("</td>")
+            .append("<td>").append(s.status).append("</td>")
+            .append("<td>").append(s.lastPassDate == null ? "-" : s.lastPassDate).append("</td>")
+            .append("<td>").append(escapeHtml(s.lastFailureReason == null ? "-" : s.lastFailureReason)).append("</td>")
+            .append("<td>").append(String.format("%.1f%%", passRate)).append("</td>")
+            .append("<td>").append(trend).append("</td>")
+            .append("</tr>");
     }
+    html.append("</table>");
+
+    // JS Filter
+    html.append("<script>")
+        .append("function filter(status){document.querySelectorAll('tr').forEach(tr=>{")
+        .append("if(!tr.classList.contains(status)&&status!=='ALL'&&tr.classList.length)tr.style.display='none';")
+        .append("else tr.style.display='';});}")
+        .append("</script>");
+
+    html.append("</body></html>");
+
+    if (!reportFile.getParentFile().exists()) reportFile.getParentFile().mkdirs();
+    Files.writeString(Path.of(reportFile.toURI()), html.toString());
+}
 
     private String escapeHtml(String s) {
         return s.replace("&","&amp;").replace("<","&lt;").replace(">","&gt;");
