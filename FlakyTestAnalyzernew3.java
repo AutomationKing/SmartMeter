@@ -85,7 +85,8 @@ public class FlakyTestAnalyzer implements TestExecutionListener {
                         nowPassed ? timestamp : stats.lastPassedDate,
                         nowPassed ? "PASSED" : (isFlaky ? "FLAKY" : "FAILED"),
                         stats.passCount + (nowPassed ? 1 : 0),
-                        stats.failCount + (!nowPassed && !isFlaky ? 1 : 0)
+                        stats.failCount + (!nowPassed && !isFlaky ? 1 : 0),
+                        isFlaky ? 1 : 0
                 ));
             }
 
@@ -160,6 +161,8 @@ public class FlakyTestAnalyzer implements TestExecutionListener {
             if ("SUCCESSFUL".equals(status)) {
                 stats.passCount++;
                 stats.lastPassedDate = e.path("timestamp").asText(null);
+            } else if ("FLAKY".equals(status)) {
+                stats.flakyCount++;
             } else {
                 stats.failCount++;
             }
@@ -167,22 +170,25 @@ public class FlakyTestAnalyzer implements TestExecutionListener {
         return stats;
     }
 
-  private String getRecentHistoryTrend(JsonNode history, int limit) {
-    if (history == null || !history.isArray()) return "";
-    StringBuilder sb = new StringBuilder();
-    int size = history.size();
-    for (int i = Math.max(0, size - limit); i < size; i++) {
-        JsonNode run = history.get(i);
-        String status = run.path("status").asText("");
-        String timestamp = run.path("timestamp").asText("");
-        String icon = "SUCCESSFUL".equals(status) ? "✅" : "❌";
-        // Wrap icon in span with tooltip
-        sb.append("<span title='").append(status.equals("SUCCESSFUL") ? "Passed at " : "Failed at ")
-          .append(timestamp).append("'>").append(icon).append("</span>");
-    }
-    return sb.toString();
-}
+    private String getRecentHistoryTrend(JsonNode history, int limit) {
+        if (history == null || !history.isArray()) return "";
+        StringBuilder sb = new StringBuilder();
+        int size = history.size();
+        for (int i = Math.max(0, size - limit); i < size; i++) {
+            JsonNode run = history.get(i);
+            String status = run.path("status").asText("");
+            String timestamp = run.path("timestamp").asText("");
+            String icon;
+            if ("SUCCESSFUL".equals(status)) icon = "✅";
+            else if ("FLAKY".equals(status)) icon = "⚠️";
+            else icon = "❌";
 
+            sb.append("<span title='")
+              .append(status.equals("SUCCESSFUL") ? "Passed at " : status.equals("FLAKY") ? "Flaky at " : "Failed at ")
+              .append(timestamp).append("'>").append(icon).append("</span>");
+        }
+        return sb.toString();
+    }
 
     private void generateHtmlReport() throws IOException {
         StringBuilder html = new StringBuilder();
@@ -191,14 +197,13 @@ public class FlakyTestAnalyzer implements TestExecutionListener {
             .append("body{font-family:Arial;margin:20px;}table{border-collapse:collapse;width:100%;}")
             .append("th,td{border:1px solid #ccc;padding:8px;text-align:left;}th{background:#333;color:#fff;}") 
             .append(".PASSED{background:#d4edda}.FLAKY{background:#fff3cd}.FAILED{background:#f8d7da}")
-            .append("button{margin-right:5px;padding:5px 10px;border:none;border-radius:4px;cursor:pointer;}")
+            .append("button{margin-right:5px;padding:5px 10px;border:none;border-radius:4px;cursor:pointer;}") 
             .append("</style></head><body>");
 
         html.append("<h1>Test Execution Report</h1>");
         html.append(String.format("<p><b>Total:</b> %d | <b>Passed:</b> %d | <b>Flaky:</b> %d | <b>Failed:</b> %d</p>",
                 total, passed, flaky, failed));
 
-        // Filter buttons
         html.append("<p>")
             .append("<button onclick=\"filter('ALL')\">All</button>")
             .append("<button onclick=\"filter('PASSED')\">Passed</button>")
@@ -206,31 +211,21 @@ public class FlakyTestAnalyzer implements TestExecutionListener {
             .append("<button onclick=\"filter('FAILED')\">Failed</button>")
             .append("</p>");
 
-        // Responsive Pie Chart
         html.append("<div style='width:400px; max-width:50%; height:400px; margin-bottom:20px;'>")
-            .append("<canvas id='summaryChart'></canvas>")
-            .append("</div>")
+            .append("<canvas id='summaryChart'></canvas></div>")
             .append("<script src='https://cdn.jsdelivr.net/npm/chart.js'></script>")
             .append("<script>")
             .append("const ctx = document.getElementById('summaryChart').getContext('2d');")
-            .append("new Chart(ctx, {")
-            .append("type: 'pie',")
-            .append("data: {")
-            .append("labels: ['Passed', 'Flaky', 'Failed'],")
-            .append("datasets: [{")
+            .append("new Chart(ctx, {type: 'pie',data: {labels: ['Passed', 'Flaky', 'Failed'],datasets: [{")
             .append("data: [").append(passed).append(",").append(flaky).append(",").append(failed).append("],")
-            .append("backgroundColor: ['#28a745','#ffc107','#dc3545']")
-            .append("}]")
-            .append("},")
-            .append("options: {responsive: true, maintainAspectRatio: false}")
-            .append("});")
+            .append("backgroundColor: ['#28a745','#ffc107','#dc3545']}]},options: {responsive: true, maintainAspectRatio: false}});")
             .append("</script>");
 
-        // Table
         html.append("<table><tr><th>Test</th><th>Status</th><th>Last Passed</th><th>Reason</th><th>Pass %</th><th>Trend</th></tr>");
         for (TestSummary s : thisRunSummaries) {
             JsonNode history = testsNode.get(s.name);
-            double passRate = s.passCount + s.failCount == 0 ? 0 : (s.passCount * 100.0 / (s.passCount + s.failCount));
+            double totalRuns = s.passCount + s.failCount + s.flakyCount;
+            double passRate = totalRuns == 0 ? 0 : ((s.passCount + s.flakyCount) * 100.0 / totalRuns);
             String trend = getRecentHistoryTrend(history, 5);
             html.append("<tr class='").append(s.status).append("'>")
                 .append("<td>").append(escapeHtml(s.name)).append("</td>")
@@ -243,12 +238,9 @@ public class FlakyTestAnalyzer implements TestExecutionListener {
         }
         html.append("</table>");
 
-        // JS Filter
-        html.append("<script>")
-            .append("function filter(status){document.querySelectorAll('tr').forEach(tr=>{")
+        html.append("<script>function filter(status){document.querySelectorAll('tr').forEach(tr=>{")
             .append("if(!tr.classList.contains(status)&&status!=='ALL'&&tr.classList.length)tr.style.display='none';")
-            .append("else tr.style.display='';});}")
-            .append("</script>");
+            .append("else tr.style.display='';});}</script>");
 
         html.append("</body></html>");
 
@@ -274,19 +266,21 @@ public class FlakyTestAnalyzer implements TestExecutionListener {
     private static class TestStats {
         int passCount = 0;
         int failCount = 0;
+        int flakyCount = 0;
         String lastPassedDate = null;
     }
 
     private static class TestSummary {
         final String name, lastFailureReason, lastPassDate, status;
-        final int passCount, failCount;
-        TestSummary(String name, String lastFailureReason, String lastPassDate, String status, int passCount, int failCount) {
+        final int passCount, failCount, flakyCount;
+        TestSummary(String name, String lastFailureReason, String lastPassDate, String status, int passCount, int failCount, int flakyCount) {
             this.name = name;
             this.lastFailureReason = lastFailureReason;
             this.lastPassDate = lastPassDate;
             this.status = status;
             this.passCount = passCount;
             this.failCount = failCount;
+            this.flakyCount = flakyCount;
         }
     }
 }
