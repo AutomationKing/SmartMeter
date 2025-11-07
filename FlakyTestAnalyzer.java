@@ -17,9 +17,8 @@ public class FlakyTestAnalyzer implements TestExecutionListener {
     private final ObjectMapper mapper = new ObjectMapper();
     private final File historyFile;
     private final List<TestSummary> allTestsList = new ArrayList<>();
-    private int totalTests = 0, totalFlaky = 0, totalFailures = 0;
+    private int totalTests = 0, totalPassed = 0, totalFlaky = 0, totalFailures = 0;
 
-    // Capture console output
     private final ByteArrayOutputStream consoleBuffer = new ByteArrayOutputStream();
     private final PrintStream originalOut = System.out;
 
@@ -27,15 +26,14 @@ public class FlakyTestAnalyzer implements TestExecutionListener {
         this.historyFile = new File("test-history/test-history.json");
         if (!historyFile.getParentFile().exists()) historyFile.getParentFile().mkdirs();
 
-        // Redirect console output to buffer
+        // Capture console logs
         System.setOut(new PrintStream(new TeeOutputStream(originalOut, consoleBuffer)));
     }
 
     @Override
     public void testPlanExecutionFinished(TestPlan testPlan) {
-        // Restore original console
+        // Restore console
         System.setOut(originalOut);
-
         try {
             String logs = consoleBuffer.toString();
             parseFailedScenarios(logs);
@@ -45,40 +43,13 @@ public class FlakyTestAnalyzer implements TestExecutionListener {
         }
     }
 
-    // Parse failed scenarios from console logs
+    // Parse "Failed scenarios:" and short error messages
     private void parseFailedScenarios(String logs) {
-        // Pattern matches: classpath:...feature:LINE
-        Pattern pattern = Pattern.compile("classpath:[^\\s]+\\.feature:\\d+");
-        String[] lines = logs.split("\\r?\\n");
+        List<String> failedTests = extractFailedTests(logs);
+        Map<String, String> errorMessages = extractErrorMessages(logs);
 
-        // Map to store unique scenario -> failure reason
-        Map<String, String> scenarioMap = new LinkedHashMap<>();
-
-        for (int i = 0; i < lines.length; i++) {
-            Matcher matcher = pattern.matcher(lines[i]);
-            if (matcher.find()) {
-                String testName = matcher.group().trim();
-
-                // Find failure reason from subsequent lines
-                String reason = "-";
-                for (int j = i + 1; j < lines.length; j++) {
-                    String nextLine = lines[j].trim();
-                    if (!nextLine.isEmpty() && !nextLine.startsWith("Failed scenarioes:") &&
-                        !pattern.matcher(nextLine).find()) {
-                        reason = nextLine;
-                        break;
-                    }
-                }
-
-                scenarioMap.put(testName, reason);
-            }
-        }
-
-        // Populate allTestsList and update history
-        for (Map.Entry<String, String> entry : scenarioMap.entrySet()) {
-            String testName = entry.getKey();
-            String reason = entry.getValue();
-
+        for (String testName : failedTests) {
+            String reason = errorMessages.getOrDefault(testName, "No detailed error found");
             TestStats stats = getHistoricalStats(testName);
             boolean isFlaky = stats.passCount > 0;
 
@@ -93,6 +64,49 @@ public class FlakyTestAnalyzer implements TestExecutionListener {
 
             logToHistory(testName, isFlaky ? "FLAKY" : "FAILED", 0, reason, isFlaky);
         }
+    }
+
+    // Extract failed scenario names from "Failed scenarios:" block
+    private List<String> extractFailedTests(String logs) {
+        List<String> result = new ArrayList<>();
+        Pattern pattern = Pattern.compile("Failed scenarios:\\s*(classpath:[^\\n]+)", Pattern.MULTILINE);
+        Matcher matcher = pattern.matcher(logs);
+
+        while (matcher.find()) {
+            String block = matcher.group(1);
+            for (String line : block.split("\\r?\\n")) {
+                if (line.trim().startsWith("classpath:")) {
+                    result.add(line.trim());
+                }
+            }
+        }
+
+        // Also catch extra classpath lines if printed separately
+        Matcher extra = Pattern.compile("classpath:[^\\s]+\\.feature:\\d+").matcher(logs);
+        while (extra.find()) {
+            String test = extra.group().trim();
+            if (!result.contains(test)) result.add(test);
+        }
+        return result;
+    }
+
+    // Extract the first concise error message following each failed test
+    private Map<String, String> extractErrorMessages(String logs) {
+        Map<String, String> errors = new LinkedHashMap<>();
+
+        // Capture first exception or cause line
+        Pattern pattern = Pattern.compile(
+                "(classpath:[^\\s]+\\.feature:\\d+)[\\s\\S]{0,300}?(org\\.[a-zA-Z0-9_.]+(?:Exception|Error):[^\n]*)",
+                Pattern.MULTILINE);
+
+        Matcher matcher = pattern.matcher(logs);
+        while (matcher.find()) {
+            String test = matcher.group(1).trim();
+            String message = matcher.group(2).trim();
+            errors.put(test, message);
+        }
+
+        return errors;
     }
 
     private void logToHistory(String testKey, String status, long duration, String reason, boolean flakyLike) {
@@ -118,7 +132,6 @@ public class FlakyTestAnalyzer implements TestExecutionListener {
             testHistory.add(entry);
             testsNode.set(testKey, testHistory);
             mapper.writerWithDefaultPrettyPrinter().writeValue(historyFile, root);
-
         } catch (Exception e) {
             e.printStackTrace();
         }
@@ -156,18 +169,19 @@ public class FlakyTestAnalyzer implements TestExecutionListener {
             html.append("<!DOCTYPE html><html lang='en'><head><meta charset='UTF-8'>")
                 .append("<title>Test Report</title>")
                 .append("<style>")
-                .append("body {font-family: Arial, sans-serif; margin: 20px;} ")
-                .append("table {border-collapse: collapse; width: 100%;} ")
-                .append("th, td {border: 1px solid #ccc; padding: 8px;} ")
-                .append("th {background:#555; color:#fff;} ")
+                .append("body {font-family: Arial, sans-serif; margin: 20px;}")
+                .append("table {border-collapse: collapse; width: 100%;}")
+                .append("th, td {border: 1px solid #ccc; padding: 8px;}")
+                .append("th {background:#333; color:#fff;}")
                 .append(".PASSED {background:#d4edda;} .FLAKY {background:#fff3cd;} .FAILED {background:#f8d7da;}")
                 .append("</style></head><body>");
 
             html.append("<h1>Test Execution Report</h1>");
-            html.append(String.format("<p>Total: %d | Flaky: %d | Failed: %d</p>", totalTests, totalFlaky, totalFailures));
+            html.append(String.format("<p><b>Total:</b> %d | <b>Flaky:</b> %d | <b>Failed:</b> %d</p>",
+                    totalTests, totalFlaky, totalFailures));
 
             html.append("<table>");
-            html.append("<tr><th>Test Name</th><th>Status</th><th>Last Passed Date</th><th>Last Failure Reason</th></tr>");
+            html.append("<tr><th>Test Name</th><th>Status</th><th>Last Passed Date</th><th>Failure Reason</th></tr>");
 
             for (TestSummary t : allTestsList) {
                 html.append("<tr class='").append(t.status).append("'>")
