@@ -2,44 +2,38 @@ private void generateHtmlReport() throws IOException {
     StringBuilder html = new StringBuilder();
     html.append("<!DOCTYPE html><html lang='en'><head><meta charset='UTF-8'>")
         .append("<title>Test Report</title><style>")
-        // General body
-        .append("body{font-family:Arial;margin:0;padding:0;background:#f4f6f8;}")
-        // Header with image
-        .append(".header{background:url('https://www.gov.uk/government/publications/child-maintenance-service-logo/child-maintenance-service.png') no-repeat left center;background-size:80px auto; padding:20px 20px 20px 120px; color:#333;}")
-        .append(".header h1{margin:0;font-size:28px;}")
-        // Summary stats
-        .append(".summary{text-align:center;margin:20px;font-size:16px;}")
-        // Table style
-        .append("table{border-collapse:collapse;width:95%;margin:20px auto;background:#fff;box-shadow:0 0 10px rgba(0,0,0,0.1);}")
-        .append("th,td{border:1px solid #ccc;padding:12px;text-align:left;}")
-        .append("th{background:#005ea5;color:#fff;font-size:16px;}")
-        .append("tr.PASSED{background:#d4edda;} tr.FLAKY{background:#fff3cd;} tr.FAILED{background:#f8d7da;}")
-        .append("tr:hover{background:#e2e6ea;}")
-        // Buttons style
-        .append(".filters{text-align:center;margin:20px;}")
-        .append(".filters button{margin:5px;padding:8px 15px;border:none;border-radius:5px;cursor:pointer;background:#005ea5;color:#fff;font-weight:bold;}")
-        .append(".filters button:hover{background:#003d7a;}")
-        // Chart container
-        .append(".chart-container{width:400px; max-width:50%; height:400px; margin:20px auto;}")
+        // Body styling with gradient background
+        .append("body{font-family:Arial, sans-serif;margin:20px;background: linear-gradient(to right, #f9f9f9, #e0f7fa);}")
+        // Table styling
+        .append("table{border-collapse:collapse;width:100%;box-shadow:0 2px 5px rgba(0,0,0,0.1);}")
+        .append("th,td{border:1px solid #ccc;padding:10px;text-align:left;}th{background:#00796b;color:white;}") 
+        .append(".PASSED{background:#d4edda}.FLAKY{background:#fff3cd}.FAILED{background:#f8d7da}")
+        // Button styling
+        .append("button{margin-right:5px;padding:5px 10px;border:none;border-radius:4px;cursor:pointer;background:#00796b;color:white;}") 
+        .append("button:hover{background:#004d40;}") 
         .append("</style></head><body>");
 
-    // Header
-    html.append("<div class='header'><h1>Test Execution Report</h1></div>");
+    // Header image
+    html.append("<div style='text-align:center;margin-bottom:20px;'>")
+        .append("<img src='https://www.childmaintenance.service/image/logo.png' alt='Child Maintenance Service' style='height:80px;'>")
+        .append("</div>");
 
-    // Summary stats
-    html.append(String.format("<div class='summary'><b>Total:</b> %d | <b>Passed:</b> %d | <b>Flaky:</b> %d | <b>Failed:</b> %d</div>",
+    // Title and summary
+    html.append("<h1 style='text-align:center;color:#00796b;'>Test Execution Report</h1>");
+    html.append(String.format("<p style='text-align:center;font-size:16px;'><b>Total:</b> %d | <b>Passed:</b> %d | <b>Flaky:</b> %d | <b>Failed:</b> %d</p>",
             total, passed, flaky, failed));
 
-    // Filters
-    html.append("<div class='filters'>")
+    // Filter buttons
+    html.append("<p style='text-align:center;'>")
         .append("<button onclick=\"filter('ALL')\">All</button>")
         .append("<button onclick=\"filter('PASSED')\">Passed</button>")
         .append("<button onclick=\"filter('FLAKY')\">Flaky</button>")
         .append("<button onclick=\"filter('FAILED')\">Failed</button>")
-        .append("</div>");
+        .append("</p>");
 
     // Pie chart
-    html.append("<div class='chart-container'><canvas id='summaryChart'></canvas></div>")
+    html.append("<div style='width:400px; max-width:50%; height:400px; margin:0 auto 20px;'>")
+        .append("<canvas id='summaryChart'></canvas></div>")
         .append("<script src='https://cdn.jsdelivr.net/npm/chart.js'></script>")
         .append("<script>")
         .append("const ctx = document.getElementById('summaryChart').getContext('2d');")
@@ -48,14 +42,21 @@ private void generateHtmlReport() throws IOException {
         .append("backgroundColor: ['#28a745','#ffc107','#dc3545']}]},options: {responsive: true, maintainAspectRatio: false}});")
         .append("</script>");
 
-    // Table
+    // Table header
     html.append("<table><tr><th>Test</th><th>Status</th><th>Last Passed</th><th>Reason</th><th>Pass %</th><th>Trend</th></tr>");
     for (TestSummary s : thisRunSummaries) {
         JsonNode history = testsNode.get(s.name);
         double totalRuns = s.passCount + s.failCount + s.flakyCount;
         double passRate = totalRuns == 0 ? 0 : ((s.passCount + s.flakyCount) * 100.0 / totalRuns);
         String trend = getRecentHistoryTrend(history, 5);
-        html.append("<tr class='").append(s.status).append("'>")
+
+        // Fix: include FLAKY class even if test passed now but was flaky before
+        String trClass = s.status;
+        if (s.flakyCount > 0 && !"FLAKY".equals(s.status)) {
+            trClass += " FLAKY";
+        }
+
+        html.append("<tr class='").append(trClass).append("'>")
             .append("<td>").append(escapeHtml(s.name)).append("</td>")
             .append("<td>").append(s.status).append("</td>")
             .append("<td>").append(s.lastPassDate == null ? "-" : s.lastPassDate).append("</td>")
@@ -66,10 +67,16 @@ private void generateHtmlReport() throws IOException {
     }
     html.append("</table>");
 
-    // Filter script
-    html.append("<script>function filter(status){document.querySelectorAll('tr').forEach(tr=>{")
-        .append("if(!tr.classList.contains(status)&&status!=='ALL'&&tr.classList.length)tr.style.display='none';")
-        .append("else tr.style.display='';});}</script>");
+    // JS filter
+    html.append("<script>")
+        .append("function filter(status){")
+        .append("document.querySelectorAll('tr').forEach(tr=>{")
+        .append("if(tr.querySelectorAll('td').length === 0) return;") // skip header row
+        .append("if(status === 'ALL'){ tr.style.display=''; }")
+        .append("else { tr.style.display = tr.classList.contains(status) ? '' : 'none'; }")
+        .append("});")
+        .append("}")
+        .append("</script>");
 
     html.append("</body></html>");
 
