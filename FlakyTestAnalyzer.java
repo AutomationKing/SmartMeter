@@ -1,243 +1,282 @@
 package utils;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+
 import org.junit.platform.launcher.TestExecutionListener;
 import org.junit.platform.launcher.TestPlan;
 
 import java.io.*;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.LocalDateTime;
 import java.util.*;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
+/**
+ * Flaky test analyzer that reads Cucumber JSON report (recommended).
+ * - Configure Cucumber to write JSON (e.g. --plugin json:target/cucumber.json)
+ * - Set system property cucumber.json.path to point to JSON (optional)
+ *
+ * Produces:
+ * - test-history/test-history.json (history across runs)
+ * - test-history/test-report.html (HTML report)
+ */
 public class FlakyTestAnalyzer implements TestExecutionListener {
 
     private final ObjectMapper mapper = new ObjectMapper();
-    private final File historyFile;
-    private final List<TestSummary> allTestsList = new ArrayList<>();
-    private int totalTests = 0, totalPassed = 0, totalFlaky = 0, totalFailures = 0;
+    private final File historyFile = new File("test-history/test-history.json");
+    private final File reportFile = new File("test-history/test-report.html");
 
-    private final ByteArrayOutputStream consoleBuffer = new ByteArrayOutputStream();
-    private final PrintStream originalOut = System.out;
-
-    public FlakyTestAnalyzer() {
-        this.historyFile = new File("test-history/test-history.json");
-        if (!historyFile.getParentFile().exists()) historyFile.getParentFile().mkdirs();
-
-        // Capture console logs
-        System.setOut(new PrintStream(new TeeOutputStream(originalOut, consoleBuffer)));
-    }
+    // In-memory summary for this run
+    private final List<TestSummary> thisRunSummaries = new ArrayList<>();
+    private int total = 0, passed = 0, flaky = 0, failed = 0;
 
     @Override
     public void testPlanExecutionFinished(TestPlan testPlan) {
-        // Restore console
-        System.setOut(originalOut);
         try {
-            String logs = consoleBuffer.toString();
-            parseFailedScenarios(logs);
-            generateHtmlReport();
-        } catch (Exception e) {
-            e.printStackTrace();
-        }
-    }
-
-    // Parse "Failed scenarios:" and short error messages
-    private void parseFailedScenarios(String logs) {
-        List<String> failedTests = extractFailedTests(logs);
-        Map<String, String> errorMessages = extractErrorMessages(logs);
-
-        for (String testName : failedTests) {
-            String reason = errorMessages.getOrDefault(testName, "No detailed error found");
-            TestStats stats = getHistoricalStats(testName);
-            boolean isFlaky = stats.passCount > 0;
-
-            totalTests++;
-            if (isFlaky) {
-                totalFlaky++;
-                allTestsList.add(new TestSummary(testName, reason, stats.lastPassedDate, "FLAKY"));
-            } else {
-                totalFailures++;
-                allTestsList.add(new TestSummary(testName, reason, stats.lastPassedDate, "FAILED"));
+            // 1) locate cucumber JSON
+            String jsonPath = System.getProperty("cucumber.json.path", "target/cucumber.json");
+            File jsonFile = new File(jsonPath);
+            if (!jsonFile.exists()) {
+                System.out.println("⚠️ Cucumber JSON not found at " + jsonFile.getAbsolutePath() +
+                        " — falling back to console parsing not implemented here.");
+                return;
             }
 
-            logToHistory(testName, isFlaky ? "FLAKY" : "FAILED", 0, reason, isFlaky);
-        }
-    }
+            // 2) parse cucumber json and collect scenarios
+            Map<String, ScenarioResult> scenarioResults = parseCucumberJson(jsonFile);
 
-    // Extract failed scenario names from "Failed scenarios:" block
-    private List<String> extractFailedTests(String logs) {
-        List<String> result = new ArrayList<>();
-        Pattern pattern = Pattern.compile("Failed scenarios:\\s*(classpath:[^\\n]+)", Pattern.MULTILINE);
-        Matcher matcher = pattern.matcher(logs);
-
-        while (matcher.find()) {
-            String block = matcher.group(1);
-            for (String line : block.split("\\r?\\n")) {
-                if (line.trim().startsWith("classpath:")) {
-                    result.add(line.trim());
-                }
-            }
-        }
-
-        // Also catch extra classpath lines if printed separately
-        Matcher extra = Pattern.compile("classpath:[^\\s]+\\.feature:\\d+").matcher(logs);
-        while (extra.find()) {
-            String test = extra.group().trim();
-            if (!result.contains(test)) result.add(test);
-        }
-        return result;
-    }
-
-    // Extract the first concise error message following each failed test
-    private Map<String, String> extractErrorMessages(String logs) {
-        Map<String, String> errors = new LinkedHashMap<>();
-
-        // Capture first exception or cause line
-        Pattern pattern = Pattern.compile(
-                "(classpath:[^\\s]+\\.feature:\\d+)[\\s\\S]{0,300}?(org\\.[a-zA-Z0-9_.]+(?:Exception|Error):[^\n]*)",
-                Pattern.MULTILINE);
-
-        Matcher matcher = pattern.matcher(logs);
-        while (matcher.find()) {
-            String test = matcher.group(1).trim();
-            String message = matcher.group(2).trim();
-            errors.put(test, message);
-        }
-
-        return errors;
-    }
-
-    private void logToHistory(String testKey, String status, long duration, String reason, boolean flakyLike) {
-        try {
-            ObjectNode root = historyFile.exists()
+            // 3) load history
+            ObjectNode historyRoot = historyFile.exists()
                     ? (ObjectNode) mapper.readTree(historyFile)
                     : mapper.createObjectNode();
+            if (!historyRoot.has("tests")) historyRoot.set("tests", mapper.createObjectNode());
 
-            if (!root.has("tests")) root.set("tests", mapper.createObjectNode());
-            ObjectNode testsNode = (ObjectNode) root.get("tests");
+            ObjectNode testsNode = (ObjectNode) historyRoot.get("tests");
 
-            ArrayNode testHistory = testsNode.has(testKey)
-                    ? (ArrayNode) testsNode.get(testKey)
-                    : mapper.createArrayNode();
+            // 4) evaluate each scenario -> update history and produce summary
+            for (Map.Entry<String, ScenarioResult> e : scenarioResults.entrySet()) {
+                String key = e.getKey();                 // e.g. classpath:...feature:1466
+                ScenarioResult r = e.getValue();
 
-            ObjectNode entry = mapper.createObjectNode();
-            entry.put("timestamp", LocalDateTime.now().toString());
-            entry.put("status", status);
-            entry.put("durationMs", duration);
-            entry.put("reason", reason);
-            entry.put("flakyPattern", flakyLike);
+                // historical stats
+                TestStats stats = readStatsForKey(testsNode, key);
 
-            testHistory.add(entry);
-            testsNode.set(testKey, testHistory);
-            mapper.writerWithDefaultPrettyPrinter().writeValue(historyFile, root);
-        } catch (Exception e) {
-            e.printStackTrace();
+                boolean nowPassed = r.status == Status.PASSED;
+                boolean isFlaky = !nowPassed && stats.passCount > 0;
+
+                // update counters
+                total++;
+                if (nowPassed) {
+                    passed++;
+                } else if (isFlaky) {
+                    flaky++;
+                } else {
+                    failed++;
+                }
+
+                // update history entry for this run
+                ArrayNode historyArray = testsNode.has(key)
+                        ? (ArrayNode) testsNode.get(key)
+                        : mapper.createArrayNode();
+
+                ObjectNode entry = mapper.createObjectNode();
+                entry.put("timestamp", LocalDateTime.now().toString());
+                entry.put("status", nowPassed ? "SUCCESSFUL" : (isFlaky ? "FLAKY" : "FAILED"));
+                entry.put("reason", r.errorMessage == null ? (nowPassed ? "Passed" : "Failed") : r.errorMessage);
+                entry.put("durationMs", r.durationMs);
+                entry.put("flakyPattern", isFlaky);
+
+                historyArray.add(entry);
+                testsNode.set(key, historyArray);
+
+                // Keep summary row
+                thisRunSummaries.add(new TestSummary(key, entry.get("reason").asText(), stats.lastPassedDate, nowPassed ? "PASSED" : (isFlaky ? "FLAKY" : "FAILED")));
+            }
+
+            // 5) write history back
+            mapper.writerWithDefaultPrettyPrinter().writeValue(historyFile, historyRoot);
+
+            // 6) generate html report
+            generateHtmlReport();
+
+            System.out.println("✅ FlakyTestAnalyzer: report at " + reportFile.getAbsolutePath());
+
+        } catch (Exception ex) {
+            ex.printStackTrace();
         }
     }
 
-    private TestStats getHistoricalStats(String testKey) {
-        TestStats stats = new TestStats();
-        if (!historyFile.exists()) return stats;
+    // Parses Cucumber JSON and builds map key -> ScenarioResult
+    private Map<String, ScenarioResult> parseCucumberJson(File jsonFile) throws IOException {
+        Map<String, ScenarioResult> map = new LinkedHashMap<>();
+        JsonNode root = mapper.readTree(jsonFile);
 
-        try {
-            ObjectNode root = (ObjectNode) mapper.readTree(historyFile);
-            ObjectNode testsNode = (ObjectNode) root.get("tests");
-            if (testsNode == null || !testsNode.has(testKey)) return stats;
+        if (!root.isArray()) return map;
 
-            ArrayNode history = (ArrayNode) testsNode.get(testKey);
-            for (int i = 0; i < history.size(); i++) {
-                ObjectNode entry = (ObjectNode) history.get(i);
-                String status = entry.get("status").asText();
-                if ("SUCCESSFUL".equals(status)) {
-                    stats.passCount++;
-                    stats.lastPassedDate = entry.get("timestamp").asText();
-                } else {
-                    stats.failCount++;
-                }
+        for (JsonNode featureNode : root) {
+            // feature uri (could be file path or classpath)
+            String uri = featureNode.path("uri").asText(null);
+            if (uri == null || uri.isEmpty()) {
+                // older cucumber JSON may use 'path' or 'name' - try 'uri' first, else skip
+                uri = featureNode.path("path").asText(null);
             }
-        } catch (Exception e) {
-            e.printStackTrace();
+
+            JsonNode elements = featureNode.path("elements");
+            if (!elements.isArray()) continue;
+            for (JsonNode element : elements) {
+                // element is a scenario/outline example
+                String type = element.path("type").asText("");
+                if (!"scenario".equalsIgnoreCase(type) && !"scenario_outline".equalsIgnoreCase(type)) {
+                    // still include scenario_outline elements if present
+                    // continue if you want to skip hooks etc.
+                }
+
+                // element may have a "line" attribute
+                int line = element.path("line").asInt(-1);
+                String name = element.path("name").asText("");
+
+                // Build key similar to rerun.txt: classpath:path/to.feature:line
+                // If uri is an absolute file path, convert to classpath-like string if you want.
+                // We'll keep raw uri (it commonly is 'classpath:functionalTest/...feature' in some setups)
+                String key;
+                if (uri != null && !uri.isEmpty() && line > 0) {
+                    key = uri + ":" + line;
+                } else if (uri != null && !uri.isEmpty()) {
+                    key = uri;
+                } else {
+                    // fallback: name + hash
+                    key = name + "@" + UUID.randomUUID().toString();
+                }
+
+                // Determine status and error message from steps
+                Status finalStatus = Status.PASSED;
+                String errorMsg = null;
+                long durationMs = 0;
+
+                JsonNode steps = element.path("steps");
+                if (steps.isArray()) {
+                    for (JsonNode step : steps) {
+                        JsonNode result = step.path("result");
+                        String statusS = result.path("status").asText("");
+                        if (result.has("duration")) {
+                            // cucumber-jvm writes duration in ns sometimes, but it depends on version; keep as 0 if absent
+                            long d = result.path("duration").asLong(0);
+                            // optionally convert nanoseconds -> ms if necessary
+                            durationMs += d;
+                        }
+                        if ("failed".equalsIgnoreCase(statusS)) {
+                            finalStatus = Status.FAILED;
+                            // pick first non-empty error_message
+                            String em = result.path("error_message").asText(null);
+                            if (em != null && !em.isEmpty()) {
+                                errorMsg = extractConciseError(em);
+                                break; // first failure sufficient
+                            }
+                        } else if (!"passed".equalsIgnoreCase(statusS) && finalStatus != Status.FAILED) {
+                            // treat anything else as non-passed (pending/skipped)
+                            finalStatus = Status.FAILED;
+                        }
+                    }
+                }
+
+                ScenarioResult sr = new ScenarioResult(finalStatus, errorMsg, durationMs);
+                map.put(key, sr);
+            }
+        }
+
+        return map;
+    }
+
+    private String extractConciseError(String full) {
+        if (full == null) return null;
+        // pick first non-empty line and truncate to 200 chars
+        String[] lines = full.split("\\r?\\n");
+        for (String l : lines) {
+            l = l.trim();
+            if (!l.isEmpty()) {
+                return l.length() > 200 ? l.substring(0, 200) + "..." : l;
+            }
+        }
+        return full.length() > 200 ? full.substring(0, 200) + "..." : full;
+    }
+
+    private TestStats readStatsForKey(ObjectNode testsNode, String key) {
+        TestStats stats = new TestStats();
+        if (testsNode == null || !testsNode.has(key)) return stats;
+        JsonNode history = testsNode.get(key);
+        if (!history.isArray()) return stats;
+        for (JsonNode e : history) {
+            String status = e.path("status").asText("");
+            if ("SUCCESSFUL".equals(status)) {
+                stats.passCount++;
+                stats.lastPassedDate = e.path("timestamp").asText(null);
+            } else {
+                stats.failCount++;
+            }
         }
         return stats;
     }
 
-    private void generateHtmlReport() {
-        try {
-            StringBuilder html = new StringBuilder();
-            html.append("<!DOCTYPE html><html lang='en'><head><meta charset='UTF-8'>")
-                .append("<title>Test Report</title>")
-                .append("<style>")
-                .append("body {font-family: Arial, sans-serif; margin: 20px;}")
-                .append("table {border-collapse: collapse; width: 100%;}")
-                .append("th, td {border: 1px solid #ccc; padding: 8px;}")
-                .append("th {background:#333; color:#fff;}")
-                .append(".PASSED {background:#d4edda;} .FLAKY {background:#fff3cd;} .FAILED {background:#f8d7da;}")
-                .append("</style></head><body>");
+    private void generateHtmlReport() throws IOException {
+        StringBuilder html = new StringBuilder();
+        html.append("<!DOCTYPE html><html lang='en'><head><meta charset='UTF-8'>")
+            .append("<title>Test Report</title><style>")
+            .append("body{font-family:Arial;margin:20px;}table{border-collapse:collapse;width:100%;}")
+            .append("th,td{border:1px solid #ccc;padding:8px;text-align:left;}th{background:#333;color:#fff;}")
+            .append(".PASSED{background:#d4edda}.FLAKY{background:#fff3cd}.FAILED{background:#f8d7da}")
+            .append("</style></head><body>");
+        html.append("<h1>Test Execution Report</h1>");
+        html.append(String.format("<p><b>Total:</b> %d | <b>Passed:</b> %d | <b>Flaky:</b> %d | <b>Failed:</b> %d</p>",
+                total, passed, flaky, failed));
+        html.append("<table><tr><th>Test</th><th>Status</th><th>Last Passed</th><th>Reason</th></tr>");
+        for (TestSummary s : thisRunSummaries) {
+            html.append("<tr class='").append(s.status).append("'>")
+                .append("<td>").append(escapeHtml(s.name)).append("</td>")
+                .append("<td>").append(s.status).append("</td>")
+                .append("<td>").append(s.lastPassDate == null ? "-" : s.lastPassDate).append("</td>")
+                .append("<td>").append(escapeHtml(s.lastFailureReason == null ? "-" : s.lastFailureReason)).append("</td>")
+                .append("</tr>");
+        }
+        html.append("</table></body></html>");
 
-            html.append("<h1>Test Execution Report</h1>");
-            html.append(String.format("<p><b>Total:</b> %d | <b>Flaky:</b> %d | <b>Failed:</b> %d</p>",
-                    totalTests, totalFlaky, totalFailures));
+        if (!reportFile.getParentFile().exists()) reportFile.getParentFile().mkdirs();
+        Files.writeString(Path.of(reportFile.toURI()), html.toString());
+    }
 
-            html.append("<table>");
-            html.append("<tr><th>Test Name</th><th>Status</th><th>Last Passed Date</th><th>Failure Reason</th></tr>");
+    private String escapeHtml(String s) {
+        return s.replace("&","&amp;").replace("<","&lt;").replace(">","&gt;");
+    }
 
-            for (TestSummary t : allTestsList) {
-                html.append("<tr class='").append(t.status).append("'>")
-                    .append("<td>").append(t.name).append("</td>")
-                    .append("<td>").append(t.status).append("</td>")
-                    .append("<td>").append(t.lastPassDate == null ? "-" : t.lastPassDate).append("</td>")
-                    .append("<td>").append(t.lastFailureReason).append("</td>")
-                    .append("</tr>");
-            }
-
-            html.append("</table></body></html>");
-
-            File reportFile = new File("test-history/test-report.html");
-            if (!reportFile.getParentFile().exists()) reportFile.getParentFile().mkdirs();
-            try (BufferedWriter writer = new BufferedWriter(new FileWriter(reportFile))) {
-                writer.write(html.toString());
-            }
-
-            System.out.println("✅ HTML Test Report generated at: " + reportFile.getAbsolutePath());
-        } catch (Exception e) {
-            e.printStackTrace();
+    // ---------------- helper classes ----------------
+    private static class ScenarioResult {
+        final Status status;
+        final String errorMessage;
+        final long durationMs;
+        ScenarioResult(Status status, String errorMessage, long durationMs) {
+            this.status = status;
+            this.errorMessage = errorMessage;
+            this.durationMs = durationMs;
         }
     }
 
+    private enum Status { PASSED, FAILED }
+
     private static class TestStats {
-        int passCount = 0, failCount = 0;
+        int passCount = 0;
+        int failCount = 0;
         String lastPassedDate = null;
     }
 
     private static class TestSummary {
-        String name;
-        String lastFailureReason;
-        String lastPassDate;
-        String status;
-
-        TestSummary(String name, String reason, String lastPassDate, String status) {
-            this.name = name;
-            this.lastFailureReason = reason;
-            this.lastPassDate = lastPassDate;
-            this.status = status;
-        }
-    }
-
-    private static class TeeOutputStream extends OutputStream {
-        private final OutputStream out1;
-        private final OutputStream out2;
-
-        TeeOutputStream(OutputStream out1, OutputStream out2) {
-            this.out1 = out1;
-            this.out2 = out2;
-        }
-
-        @Override
-        public void write(int b) throws IOException {
-            out1.write(b);
-            out2.write(b);
+        final String name;
+        final String lastFailureReason;
+        final String lastPassDate;
+        final String status;
+        TestSummary(String name, String lastFailureReason, String lastPassDate, String status) {
+            this.name = name; this.lastFailureReason = lastFailureReason; this.lastPassDate = lastPassDate; this.status = status;
         }
     }
 }
