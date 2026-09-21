@@ -1,0 +1,32 @@
+[20:28, 17/09/2026] Ravi Rai: QUESTION T5: TESTING APPROACH FOR DISTRIBUTED MONOLITH DECOMPOSITION
+
+TENDER REFERENCE: DWP Working Age Services — Project Zora Stage 2
+QUESTION NUMBER: T5 (Question Weighting: 10%)
+RESPONSE FORMAT: Arial 11pt, Max 3 Sides of A4, Max 2 Diagrams
+
+=====================================================================================
+
+INTRODUCTION: INDEPENDENT ASSURANCE FOR PROJECT ZORA
+
+Project Zora’s progressive decomposition of the Universal Credit (UC) application from a distributed monolith into an event-driven microservices architecture requires an independent, objective Quality Assurance framework. Operating as an independent QA partner alongside multi-vendor development teams, our strategy prevents cross-supplier bottlenecks, environment contention, and …
+[20:32, 17/09/2026] Ravi Rai: ———-))))))
+[20:32, 17/09/2026] Ravi Rai: Context & Continuation Prompt (Part 1 of 3):
+
+We are preparing a bid submission for DWP Working Age Services — Project Zora Stage 2 (Question T5).
+
+Role & Architecture Context:
+- Project Goal: Progressive decomposition of Universal Credit (UC) from a distributed monolith into an event-driven microservices architecture.
+- Our Role: We are bidding strictly as the Independent Quality Assurance Lead / Testing Partner. Development work is handled by third-party vendor teams, not our company.
+- QA Strategy: Shifting from heavy monolithic E2E testing to decoupled, granular testing (Pact consumer-driven contracts, API testing, automated dual-write data reconciliation, service virtualisation using WireMock/Hoverfly, and OpenTelemetry observability) to enforce multi-vendor quality gates.
+[20:33, 17/09/2026] Ravi Rai: Context & Continuation Prompt (Part 2 of 3):
+
+Key Case Studies & Proof Points Included in Response:
+1. Primary Case Study (CMS to NMP Transformation): Decomposing DWP Child Maintenance Service (AEM monolith) into Notifications Management Platform (NMP). Verified via Pact contract testing, correlation IDs for idempotency, and dual-run shadow traffic reconciliation. Achieved £2M in savings within 2 months (£10M forecast total) with zero high-severity defects.
+2. Technical Reference Case Study (Kiro AI + Playwright): Used Kiro AI (AI-assisted coding platform) to refactor and migrate 6 DWP applications from legacy Selenium Java to Playwright TypeScript in under 30 days. Achieved 4x test execution speedup and eliminated environmental flakiness.
+[20:33, 17/09/2026] Ravi Rai: Context & Continuation Prompt (Part 3 of 3):
+
+Formatting Constraints Required:
+- Word/Page Limit: Strict 3 A4 pages, Arial 11pt format, maximum 2 ASCII text diagrams.
+- Structure: 3 Main Sections (Section 1: Track Record & Case Study; Section 2: Replacing E2E with Granular Testing & Risk-Based Framework; Section 3: Governance, DoD/DoR & Independent Multi-Vendor Quality Gates).
+
+Current Status: The 3-page response draft for Question T5 is finalized. Please acknowledge receipt of this context and await my next instruction.
